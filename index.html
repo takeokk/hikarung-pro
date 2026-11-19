@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="HIKARUNG-PRO">
+  <meta name="theme-color" content="#0b0f19">
+  <title>HIKARUNG-PRO | 配信・イベント用ポン出し＆BGMデッキ</title>
+  <link rel="manifest" href="./manifest.json">
+  <link rel="icon" type="image/svg+xml" href="./icon.svg">
+  <link rel="apple-touch-icon" href="./icon.svg">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <!-- ==================== TOP HEADER BAR ==================== -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <div class="brand">
+          <img src="./icon.svg" alt="icon" class="brand-icon">
+          <div class="brand-text">
+            <span class="brand-title">HIKARUNG <small>PRO</small></span>
+            <span id="offlineStatusBadge" class="status-badge online">OFFLINE READY</span>
+          </div>
+        </div>
+
+        <!-- LIVE / EDIT Mode Switch -->
+        <div class="mode-switch-group" role="group" aria-label="操作モード切替">
+          <button id="btnModeLive" class="mode-btn active" type="button" title="タップで即座に発音する本番モード">
+            <span class="dot live-dot"></span>本番 LIVE
+          </button>
+          <button id="btnModeEdit" class="mode-btn" type="button" title="タップで波形トリミングや音量・色を設定する編集モード">
+            🛠️ 編集 EDIT
+          </button>
+        </div>
+
+        <!-- Grid Size Selector -->
+        <div class="control-pill">
+          <label for="selectGridSize" class="pill-label">配列</label>
+          <select id="selectGridSize" class="pill-select">
+            <option value="3x3">3×3 (9)</option>
+            <option value="4x3">4×3 (12)</option>
+            <option value="4x4" selected>4×4 (16)</option>
+            <option value="5x4">5×4 (20)</option>
+            <option value="6x4">6×4 (24)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="topbar-center">
+        <!-- Master Volume -->
+        <div class="master-vol-group">
+          <span class="pill-label">MASTER</span>
+          <input id="sliderMasterVol" type="range" min="0" max="150" value="100" class="slider-compact">
+          <span id="labelMasterVol" class="vol-readout">100%</span>
+        </div>
+
+        <!-- Master Fade Out & Panic -->
+        <div class="emergency-group">
+          <div class="fade-combo">
+            <button id="btnMasterFade" class="btn-action btn-fadeout" type="button" title="再生中のすべての音を指定秒数でフェードアウト">
+              📉 全フェードアウト
+            </button>
+            <select id="selectMasterFadeSec" class="fade-sec-select" title="マスターフェードアウト秒数">
+              <option value="1.5">1.5秒</option>
+              <option value="3" selected>3.0秒</option>
+              <option value="5">5.0秒</option>
+              <option value="8">8.0秒</option>
+            </select>
+          </div>
+          <button id="btnPanic" class="btn-action btn-panic" type="button" title="すべてのSE・BGMを即座に強制停止 (Escキー)">
+            🛑 全停止 (PANIC)
+          </button>
+        </div>
+      </div>
+
+      <div class="topbar-right">
+        <button id="btnBatchImport" class="btn-tool" type="button" title="空きパッドへ複数の音源ファイルをまとめて読み込む">
+          📂 一括追加
+        </button>
+        <button id="btnOpenBackupModal" class="btn-tool" type="button" title="アプリ更新、全音源・設定のバックアップ保存と復元">
+          💾 保存 / メニュー
+        </button>
+        <button id="btnToggleBgmDeck" class="btn-tool btn-bgm-toggle active" type="button" title="BGMプレイリストデッキの表示/非表示">
+          🎵 BGMデッキ
+        </button>
+      </div>
+    </header>
+
+    <!-- ==================== SETLIST / BANK BAR ==================== -->
+    <nav class="bankbar" aria-label="イベント進行バンク（セットリスト）">
+      <div class="bankbar-label">📋 セットリスト:</div>
+      <div id="bankTabsContainer" class="bank-tabs"></div>
+      <div class="bank-actions">
+        <button id="btnAddBank" class="btn-bank-ctrl" type="button" title="新しい進行バンク（ページ）を追加">＋ バンク追加</button>
+        <button id="btnRenameBank" class="btn-bank-ctrl" type="button" title="現在のバンク名を変更">✏️ 名前変更</button>
+        <button id="btnDeleteBank" class="btn-bank-ctrl" type="button" title="現在のバンクを削除">🗑️</button>
+      </div>
+    </nav>
+
+    <!-- ==================== MAIN WORKSPACE ==================== -->
+    <main class="workspace">
+      <!-- Left/Center: Sampler Pad Grid -->
+      <section class="pad-section">
+        <div id="padGrid" class="pad-grid grid-4x4"></div>
+      </section>
+
+      <!-- Right: BGM Playlist Deck -->
+      <aside id="bgmDeck" class="bgm-deck">
+        <div class="bgm-deck-header">
+          <div class="bgm-title-row">
+            <span class="bgm-badge">BGM PLAYER</span>
+            <select id="selectPlaylist" class="playlist-select" title="BGMプレイリスト切替"></select>
+            <button id="btnAddPlaylist" class="btn-icon-sm" type="button" title="新規プレイリスト作成">＋</button>
+            <button id="btnRenamePlaylist" class="btn-icon-sm" type="button" title="プレイリスト名変更">✏️</button>
+            <button id="btnDeletePlaylist" class="btn-icon-sm" type="button" title="プレイリスト削除">🗑️</button>
+          </div>
+        </div>
+
+        <!-- Now Playing Card -->
+        <div class="bgm-now-playing">
+          <div class="bgm-np-top">
+            <div id="bgmNowTitle" class="bgm-np-title">停止中（曲を選択してください）</div>
+            <div id="bgmNowTime" class="bgm-np-time">00:00 / 00:00</div>
+          </div>
+
+          <div class="bgm-seek-row">
+            <input id="sliderBgmSeek" type="range" min="0" max="1000" value="0" class="bgm-seek-slider">
+          </div>
+
+          <!-- Transport Controls -->
+          <div class="bgm-transport">
+            <button id="btnBgmPrev" class="btn-transport" type="button" title="前の曲へ">⏮</button>
+            <button id="btnBgmPlayPause" class="btn-transport btn-transport-play" type="button" title="再生 / 一時停止">▶ 再生</button>
+            <button id="btnBgmFadeStop" class="btn-transport" type="button" title="クロスフェード秒数でなめらかに停止">📉 フェード停止</button>
+            <button id="btnBgmNext" class="btn-transport" type="button" title="次の曲へ（クロスフェード切替）">⏭</button>
+          </div>
+
+          <!-- Ducking (Talk Over) & Volume Row -->
+          <div class="bgm-mixer-row">
+            <button id="btnTalkOver" class="btn-talkover" type="button" title="MCトーク中にワンタップでBGM音量を25%へなめらかに減衰（もう一度押すと復帰）">
+              🎙️ TALK OVER <small>(音量減衰)</small>
+            </button>
+            <div class="bgm-vol-wrap">
+              <span class="bgm-sub-label">音量</span>
+              <input id="sliderBgmVol" type="range" min="0" max="150" value="85" class="slider-compact">
+              <span id="labelBgmVol" class="vol-readout">85%</span>
+            </div>
+          </div>
+
+          <!-- Playlist Mode & Auto Crossfade Settings -->
+          <div class="bgm-options-row">
+            <div class="bgm-opt-item">
+              <label for="selectBgmMode">進行</label>
+              <select id="selectBgmMode" class="pill-select-sm">
+                <option value="all_loop" selected>🔁 全曲ループ連続</option>
+                <option value="sequence">➡️ 順再生（最後で停止）</option>
+                <option value="one_loop">🔂 1曲リピート</option>
+                <option value="single">⏹ 1曲で停止</option>
+                <option value="shuffle">🔀 シャッフル連続</option>
+              </select>
+            </div>
+            <div class="bgm-opt-item">
+              <label for="selectBgmXfade">曲間クロスフェード</label>
+              <select id="selectBgmXfade" class="pill-select-sm">
+                <option value="0">なし (0秒)</option>
+                <option value="1.5">1.5秒</option>
+                <option value="3" selected>3.0秒</option>
+                <option value="5">5.0秒</option>
+                <option value="8">8.0秒</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Track List -->
+        <div class="bgm-tracklist-header">
+          <span>プレイリスト曲一覧</span>
+          <div class="bgm-add-btns">
+            <button id="btnAddBgmFiles" class="btn-bgm-add" type="button">＋ 音源ファイル追加</button>
+          </div>
+        </div>
+        <div id="bgmTrackList" class="bgm-tracklist"></div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- Hidden File Inputs -->
+  <input id="inputSingleAudio" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" hidden>
+  <input id="inputBatchAudio" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" multiple hidden>
+  <input id="inputBgmAudio" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" multiple hidden>
+  <input id="inputRestoreBackup" type="file" accept=".json,application/json" hidden>
+
+  <!-- ==================== WAVEFORM & PAD EDITOR MODAL ==================== -->
+  <div id="editorModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-card editor-modal-card">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span id="editorTargetBadge" class="editor-badge">PAD #1</span>
+          <h2 id="editorModalTitle" class="modal-title">パッド設定・波形簡易編集</h2>
+        </div>
+        <div class="modal-header-actions">
+          <button id="btnChangeAudioFile" class="btn-secondary" type="button">📁 音源ファイルを選択 / 差替</button>
+          <button id="btnCloseEditor" class="btn-close" type="button" aria-label="閉じる">✕</button>
+        </div>
+      </div>
+
+      <div class="modal-body editor-body">
+        <!-- Basic Info Row -->
+        <div class="editor-grid-top">
+          <div class="form-group">
+            <label for="inputEditName">表示タイトル名</label>
+            <input id="inputEditName" type="text" class="text-input" placeholder="例: オープニングSE / 歓声">
+          </div>
+
+          <div id="padOnlyModeGroup" class="form-group">
+            <label for="selectEditTriggerMode">発音モード (同時発音・切替)</label>
+            <select id="selectEditTriggerMode" class="select-input">
+              <option value="poly">POLY（重ね再生・連打で多重発音）</option>
+              <option value="retrig">RETRIG（他パッドと同時発音・自身は頭出し）</option>
+              <option value="mono">MONO（MONOグループ内で単音切替）</option>
+              <option value="xfade">X-FADE（前のX-FADE音源とクロスフェード切替）</option>
+              <option value="gate">GATE（指で押している間だけ再生）</option>
+            </select>
+          </div>
+
+          <div id="padOnlyLoopGroup" class="form-group form-group-compact">
+            <label>ループ再生</label>
+            <label class="toggle-label">
+              <input id="checkEditLoop" type="checkbox">
+              <span>リピート</span>
+            </label>
+          </div>
+
+          <div id="padOnlyKeyGroup" class="form-group form-group-compact">
+            <label for="inputEditKey">キー割当</label>
+            <input id="inputEditKey" type="text" maxlength="1" class="text-input key-input" placeholder="例: Q">
+          </div>
+        </div>
+
+        <!-- Color Palette Row (Pad Only) -->
+        <div id="padOnlyColorRow" class="color-picker-row">
+          <span class="color-row-label">パッド色:</span>
+          <div id="colorSwatches" class="color-swatches"></div>
+        </div>
+
+        <!-- Waveform Trimmer Section -->
+        <div class="waveform-panel">
+          <div class="waveform-toolbar">
+            <div class="waveform-info">
+              <span class="wf-label">波形トリミング＆フェード確認</span>
+              <span id="labelAudioMeta" class="wf-meta">音源未割当</span>
+            </div>
+            <div class="waveform-smart-btns">
+              <button id="btnAutoTrimSilence" class="btn-smart" type="button" title="先頭と末尾の無音部分を自動検出してトリミング">
+                ✂️ 前後の無音を自動カット
+              </button>
+              <button id="btnAutoNormalize" class="btn-smart" type="button" title="ピーク音量を解析して最適な音量ゲインに自動補正">
+                📊 音量を自動均一化 (ノーマライズ)
+              </button>
+              <button id="btnResetTrim" class="btn-smart" type="button" title="トリミング・速度・音量を初期値に戻す">
+                ↺ リセット
+              </button>
+            </div>
+          </div>
+
+          <div class="waveform-canvas-wrap">
+            <canvas id="waveformCanvas" width="900" height="150"></canvas>
+            <div id="waveformEmptyOverlay" class="waveform-empty-overlay">
+              <span>📂 「音源ファイルを選択」からMP3/WAV/M4A等を読み込んでください</span>
+            </div>
+          </div>
+
+          <!-- Trim Sliders & Preview -->
+          <div class="trim-controls-grid">
+            <div class="trim-control-box">
+              <div class="trim-box-head">
+                <label for="sliderTrimStart">▶ 開始位置 (頭出しトリム)</label>
+                <input id="numTrimStart" type="number" step="0.01" min="0" value="0.00" class="num-input-sm"> 秒
+              </div>
+              <input id="sliderTrimStart" type="range" min="0" max="100" step="0.01" value="0" class="slider-full">
+            </div>
+
+            <div class="trim-control-box">
+              <div class="trim-box-head">
+                <label for="sliderTrimEnd">⏹ 終了位置 (尻切りトリム)</label>
+                <input id="numTrimEnd" type="number" step="0.01" min="0" value="0.00" class="num-input-sm"> 秒
+              </div>
+              <input id="sliderTrimEnd" type="range" min="0" max="100" step="0.01" value="100" class="slider-full">
+            </div>
+
+            <div class="preview-box">
+              <button id="btnPreviewPlay" class="btn-preview-play" type="button">▶ トリム・編集状態でテスト試聴</button>
+              <button id="btnPreviewStop" class="btn-preview-stop" type="button">⏹ 停止</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Audio Parameters Sliders (Volume/Gain, Fade In/Out, Speed, Pitch) -->
+        <div class="params-grid">
+          <div class="param-card">
+            <div class="param-head">
+              <label for="sliderEditGain">🔊 個別音量・ゲイン増幅</label>
+              <span id="labelEditGain" class="param-val">100%</span>
+            </div>
+            <input id="sliderEditGain" type="range" min="0" max="300" step="1" value="100" class="slider-full">
+            <div class="param-hint">※小さい音源は最大300%まで増幅可能</div>
+          </div>
+
+          <div class="param-card">
+            <div class="param-head">
+              <label for="sliderEditFadeIn">📈 フェードイン秒数</label>
+              <span id="labelEditFadeIn" class="param-val">0.0秒</span>
+            </div>
+            <input id="sliderEditFadeIn" type="range" min="0" max="10" step="0.1" value="0" class="slider-full">
+            <div class="param-hint">再生開始時のなめらかな立ち上がり</div>
+          </div>
+
+          <div class="param-card">
+            <div class="param-head">
+              <label for="sliderEditFadeOut">📉 フェードアウト秒数</label>
+              <span id="labelEditFadeOut" class="param-val">2.0秒</span>
+            </div>
+            <input id="sliderEditFadeOut" type="range" min="0" max="15" step="0.1" value="2.0" class="slider-full">
+            <div class="param-hint">フェード停止・X-FADE時の減衰秒数</div>
+          </div>
+
+          <div class="param-card">
+            <div class="param-head">
+              <label for="sliderEditSpeed">⏩ 再生スピード</label>
+              <span id="labelEditSpeed" class="param-val">1.00x</span>
+            </div>
+            <input id="sliderEditSpeed" type="range" min="0.5" max="2.0" step="0.05" value="1.0" class="slider-full">
+            <div class="param-hint">0.5倍速 〜 2.0倍速</div>
+          </div>
+
+          <div class="param-card">
+            <div class="param-head">
+              <label for="sliderEditPitch">🎵 ピッチ（音程変更）</label>
+              <span id="labelEditPitch" class="param-val">±0 半音</span>
+            </div>
+            <input id="sliderEditPitch" type="range" min="-12" max="12" step="1" value="0" class="slider-full">
+            <div class="param-hint">-12半音（1オクターブ下）〜 +12半音</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button id="btnClearTarget" class="btn-danger-outline" type="button">🗑️ このパッドを空にする</button>
+        <div class="modal-footer-right">
+          <button id="btnSaveEditor" class="btn-primary-lg" type="button">✓ 設定を保存して閉じる</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== BACKUP / MENU / GUIDE MODAL ==================== -->
+  <div id="menuModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-card menu-modal-card">
+      <div class="modal-header">
+        <h2 class="modal-title">💾 HIKARUNG-PRO 管理メニュー</h2>
+        <button id="btnCloseMenuModal" class="btn-close" type="button">✕</button>
+      </div>
+      <div class="modal-body menu-body">
+        <div class="menu-section">
+          <h3>🔄 アプリ本体の更新（ホーム画面から消さずに更新）</h3>
+          <p class="section-desc">PC側でアプリを改修した際、Tailscaleや自宅Wi-Fiに繋がった状態で下のボタンを押すと、<strong>登録した音源や設定を残したままアプリ本体だけを最新版に更新</strong>します。</p>
+          <button id="btnUpdateAppCache" class="btn-primary-lg" type="button">🔄 アプリ本体を最新に更新して再読み込み</button>
+        </div>
+
+        <div class="menu-section">
+          <h3>📦 プロジェクト全体のバックアップ保存・復元</h3>
+          <p class="section-desc">全バンクのパッド設定、プレイリスト、取り込んだ音源データ自体を1つのファイル（<code>.json</code>）としてiPadの「ファイル」やPCに書き出し・復元できます。</p>
+          <div class="backup-btn-row">
+            <button id="btnExportBackup" class="btn-secondary-lg" type="button">⬇️ 全データをファイルに書き出す (Export)</button>
+            <button id="btnImportBackup" class="btn-secondary-lg" type="button">⬆️ バックアップファイルを読み込む (Import)</button>
+          </div>
+        </div>
+
+        <div class="menu-section danger-zone">
+          <h3>⚠️ 全データの初期化</h3>
+          <button id="btnFactoryReset" class="btn-danger-outline" type="button">すべての音源・設定を初期状態（空）に戻す</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

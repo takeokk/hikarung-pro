@@ -1,0 +1,10 @@
+.DS_Store
+Thumbs.db
+
+# Local management & build files (do not push to GitHub)
+CONTEXT.md
+CLAUDE.md
+LOG.md
+start_lan_server.bat
+build_standalone.py
+samples/
