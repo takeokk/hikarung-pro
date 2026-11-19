@@ -29,13 +29,80 @@ const MODE_LABELS = {
   gate: 'GATE'
 };
 
-const INITIAL_SAMPLE = {
-  id: 'aud_initial_yoshi',
-  name: '懸命にふんばりジャンプをするも足場に届かなかったヨッシーのモノマネ',
-  url: './samples/懸命にふんばりジャンプをするも足場に届かなかったヨッシーのモノマネ.mp3',
-  mimeType: 'audio/mpeg',
-  color: 'emerald'
-};
+const INITIAL_SAMPLES = [
+  {
+    id: 'aud_init_jan',
+    name: '🎉 タイトル・決定音 (ジャン！)',
+    file: '01_タイトル決定音_ジャン.wav',
+    url: './samples/01_タイトル決定音_ジャン.wav',
+    mimeType: 'audio/wav',
+    color: 'cyan',
+    triggerMode: 'poly',
+    loop: false,
+    fadeOut: 1.5,
+    addToBgm: false
+  },
+  {
+    id: 'aud_init_correct',
+    name: '⭕ クイズ正解 (ピンポン♪)',
+    file: '02_クイズ正解_ピンポン.wav',
+    url: './samples/02_クイズ正解_ピンポン.wav',
+    mimeType: 'audio/wav',
+    color: 'emerald',
+    triggerMode: 'poly',
+    loop: false,
+    fadeOut: 1.0,
+    addToBgm: false
+  },
+  {
+    id: 'aud_init_wrong',
+    name: '❌ クイズ不正解 (ブッブー)',
+    file: '03_クイズ不正解_ブッブー.wav',
+    url: './samples/03_クイズ不正解_ブッブー.wav',
+    mimeType: 'audio/wav',
+    color: 'rose',
+    triggerMode: 'poly',
+    loop: false,
+    fadeOut: 1.0,
+    addToBgm: false
+  },
+  {
+    id: 'aud_initial_yoshi',
+    name: '懸命にふんばりジャンプをするも足場に届かなかったヨッシーのモノマネ',
+    file: '懸命にふんばりジャンプをするも足場に届かなかったヨッシーのモノマネ.mp3',
+    url: './samples/懸命にふんばりジャンプをするも足場に届かなかったヨッシーのモノマネ.mp3',
+    mimeType: 'audio/mpeg',
+    color: 'emerald',
+    triggerMode: 'poly',
+    loop: false,
+    fadeOut: 2.0,
+    addToBgm: false
+  },
+  {
+    id: 'aud_init_bgm_talk',
+    name: '🎵 トークBGM (Chill Loop)',
+    file: '07_トークBGM_ChillLoop.wav',
+    url: './samples/07_トークBGM_ChillLoop.wav',
+    mimeType: 'audio/wav',
+    color: 'blue',
+    triggerMode: 'xfade',
+    loop: true,
+    fadeOut: 3.0,
+    addToBgm: true
+  },
+  {
+    id: 'aud_init_bgm_upbeat',
+    name: '🎵 オープニングBGM (Upbeat)',
+    file: '08_オープニングBGM_Upbeat.wav',
+    url: './samples/08_オープニングBGM_Upbeat.wav',
+    mimeType: 'audio/wav',
+    color: 'amber',
+    triggerMode: 'xfade',
+    loop: true,
+    fadeOut: 3.0,
+    addToBgm: true
+  }
+];
 
 // ==================== INDEXEDDB STORAGE ====================
 class HikarungDB {
@@ -361,64 +428,105 @@ class HikarungProApp {
       this.renderAll();
     }
 
-    // Load initial sample on first run (or if not yet initialized)
-    if (!this.state.initialSampleLoaded) {
-      await this.loadInitialSampleIfNeeded();
+    // Load initial samples in background on first run (or if v2 pack not yet loaded)
+    if (!this.state.initialSamplesV2Loaded) {
+      this.loadInitialSamplesInBackground();
     }
   }
 
-  async loadInitialSampleIfNeeded() {
+  async loadInitialSamplesInBackground() {
     try {
-      let arrayBuffer = null;
-      if (window.__EMBEDDED_INITIAL_SAMPLE_B64__) {
-        arrayBuffer = this.base64ToArrayBuffer(window.__EMBEDDED_INITIAL_SAMPLE_B64__);
-      } else {
-        const res = await fetch( encodeURI(INITIAL_SAMPLE.url) );
-        if (!res.ok) return;
-        arrayBuffer = await res.arrayBuffer();
-      }
-      if (!arrayBuffer) return;
+      const embeddedMap = window.__EMBEDDED_INITIAL_SAMPLES_B64__ || {};
 
-      const record = {
-        id: INITIAL_SAMPLE.id,
-        name: INITIAL_SAMPLE.name,
-        mimeType: INITIAL_SAMPLE.mimeType,
-        arrayBuffer,
-        duration: 0
-      };
-      const decoded = await this.decodeAndCacheAudioRecord(record);
-      if (!decoded) return;
+      // Fetch & decode all initial samples in parallel in the background
+      const loadedItems = await Promise.all(
+        INITIAL_SAMPLES.map(async (sample) => {
+          // Skip network fetch if already decoded in memory
+          if (this.audioBuffers.has(sample.id)) {
+            return { sample, duration: this.audioBuffers.get(sample.id).duration, alreadySaved: true };
+          }
+          let arrayBuffer = null;
+          if (embeddedMap[sample.file]) {
+            arrayBuffer = this.base64ToArrayBuffer(embeddedMap[sample.file]);
+          } else if ( sample.id === 'aud_initial_yoshi' && window.__EMBEDDED_INITIAL_SAMPLE_B64__ ) {
+            arrayBuffer = this.base64ToArrayBuffer(window.__EMBEDDED_INITIAL_SAMPLE_B64__);
+          } else {
+            const res = await fetch(encodeURI(sample.url));
+            if (!res.ok) return null;
+            arrayBuffer = await res.arrayBuffer();
+          }
+          if (!arrayBuffer) return null;
 
-      record.duration = decoded.duration;
-      await this.db.saveAudioFile(record);
+          const record = {
+            id: sample.id,
+            name: sample.name,
+            mimeType: sample.mimeType,
+            arrayBuffer,
+            duration: 0
+          };
+          const decoded = await this.decodeAndCacheAudioRecord(record);
+          if (!decoded) return null;
+          record.duration = decoded.duration;
+          await this.db.saveAudioFile(record);
+          return { sample, duration: decoded.duration, alreadySaved: false };
+        })
+      );
 
       const firstBank = this.state.banks[0];
-      if (firstBank && firstBank.pads && firstBank.pads.length > 0) {
-        const alreadyAssigned = firstBank.pads.some((p) => p.audioId === INITIAL_SAMPLE.id);
-        if (!alreadyAssigned) {
-          const targetPad = firstBank.pads.find((p) => !p.audioId) || firstBank.pads[0];
-          if (targetPad) {
-            targetPad.name = INITIAL_SAMPLE.name;
-            targetPad.audioId = INITIAL_SAMPLE.id;
-            targetPad.color = INITIAL_SAMPLE.color;
-            targetPad.triggerMode = decoded.duration >= 30 ? 'xfade' : 'poly';
-            targetPad.loop = false;
-            targetPad.trimStart = 0;
-            targetPad.trimEnd = Number(decoded.duration.toFixed(2));
-            targetPad.gain = 100;
-            targetPad.fadeIn = 0;
-            targetPad.fadeOut = 2.0;
-            targetPad.speed = 1.0;
-            targetPad.pitch = 0;
+      const firstPl = this.state.playlists[0];
+
+      for (const item of loadedItems) {
+        if (!item) continue;
+        const { sample, duration } = item;
+
+        // Assign to first available empty pad in Bank 1 if not already present
+        if (firstBank && Array.isArray(firstBank.pads)) {
+          const existsOnPad = firstBank.pads.some((p) => p.audioId === sample.id);
+          if (!existsOnPad) {
+            const emptyPad = firstBank.pads.find((p) => !p.audioId);
+            if (emptyPad) {
+              emptyPad.name = sample.name;
+              emptyPad.audioId = sample.id;
+              emptyPad.color = sample.color;
+              emptyPad.triggerMode = sample.triggerMode || (duration >= 30 ? 'xfade' : 'poly');
+              emptyPad.loop = Boolean(sample.loop);
+              emptyPad.trimStart = 0;
+              emptyPad.trimEnd = Number(duration.toFixed(2));
+              emptyPad.gain = 100;
+              emptyPad.fadeIn = 0;
+              emptyPad.fadeOut = sample.fadeOut ?? 2.0;
+              emptyPad.speed = 1.0;
+              emptyPad.pitch = 0;
+            }
+          }
+        }
+
+        // Also add BGM samples to the first playlist if not already present
+        if (sample.addToBgm && firstPl && Array.isArray(firstPl.tracks)) {
+          const existsInPl = firstPl.tracks.some((t) => t.audioId === sample.id);
+          if (!existsInPl) {
+            firstPl.tracks.push({
+              id: `trk_init_${sample.id}`,
+              name: sample.name,
+              audioId: sample.id,
+              gain: 90,
+              trimStart: 0,
+              trimEnd: Number(duration.toFixed(2)),
+              fadeIn: 0.5,
+              fadeOut: 2.5,
+              speed: 1.0,
+              pitch: 0
+            });
           }
         }
       }
 
       this.state.initialSampleLoaded = true;
+      this.state.initialSamplesV2Loaded = true;
       await this.saveAppState();
       this.renderAll();
     } catch (err) {
-      console.warn('Initial sample load skipped:', err);
+      console.warn('Initial samples background load warning:', err);
     }
   }
 
