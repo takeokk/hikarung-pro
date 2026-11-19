@@ -29,6 +29,14 @@ const MODE_LABELS = {
   gate: 'GATE'
 };
 
+const INITIAL_SAMPLE = {
+  id: 'aud_initial_yoshi',
+  name: '懸命にふんばりジャンプをするも足場に届かなかったヨッシーのモノマネ',
+  url: './samples/懸命にふんばりジャンプをするも足場に届かなかったヨッシーのモノマネ.mp3',
+  mimeType: 'audio/mpeg',
+  color: 'emerald'
+};
+
 // ==================== INDEXEDDB STORAGE ====================
 class HikarungDB {
   constructor() {
@@ -351,6 +359,66 @@ class HikarungProApp {
     if (userFiles.length > 0) {
       await Promise.all(userFiles.map((rec) => this.decodeAndCacheAudioRecord(rec)));
       this.renderAll();
+    }
+
+    // Load initial sample on first run (or if not yet initialized)
+    if (!this.state.initialSampleLoaded) {
+      await this.loadInitialSampleIfNeeded();
+    }
+  }
+
+  async loadInitialSampleIfNeeded() {
+    try {
+      let arrayBuffer = null;
+      if (window.__EMBEDDED_INITIAL_SAMPLE_B64__) {
+        arrayBuffer = this.base64ToArrayBuffer(window.__EMBEDDED_INITIAL_SAMPLE_B64__);
+      } else {
+        const res = await fetch( encodeURI(INITIAL_SAMPLE.url) );
+        if (!res.ok) return;
+        arrayBuffer = await res.arrayBuffer();
+      }
+      if (!arrayBuffer) return;
+
+      const record = {
+        id: INITIAL_SAMPLE.id,
+        name: INITIAL_SAMPLE.name,
+        mimeType: INITIAL_SAMPLE.mimeType,
+        arrayBuffer,
+        duration: 0
+      };
+      const decoded = await this.decodeAndCacheAudioRecord(record);
+      if (!decoded) return;
+
+      record.duration = decoded.duration;
+      await this.db.saveAudioFile(record);
+
+      const firstBank = this.state.banks[0];
+      if (firstBank && firstBank.pads && firstBank.pads.length > 0) {
+        const alreadyAssigned = firstBank.pads.some((p) => p.audioId === INITIAL_SAMPLE.id);
+        if (!alreadyAssigned) {
+          const targetPad = firstBank.pads.find((p) => !p.audioId) || firstBank.pads[0];
+          if (targetPad) {
+            targetPad.name = INITIAL_SAMPLE.name;
+            targetPad.audioId = INITIAL_SAMPLE.id;
+            targetPad.color = INITIAL_SAMPLE.color;
+            targetPad.triggerMode = decoded.duration >= 30 ? 'xfade' : 'poly';
+            targetPad.loop = false;
+            targetPad.trimStart = 0;
+            targetPad.trimEnd = Number(decoded.duration.toFixed(2));
+            targetPad.gain = 100;
+            targetPad.fadeIn = 0;
+            targetPad.fadeOut = 2.0;
+            targetPad.speed = 1.0;
+            targetPad.pitch = 0;
+          }
+        }
+      }
+
+      this.state.initialSampleLoaded = true;
+      await this.saveAppState();
+      this.renderAll();
+    } catch (err) {
+      console.warn('Initial sample load skipped:', err);
     }
   }
 
