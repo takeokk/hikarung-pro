@@ -435,8 +435,7 @@ input, select, button {
 
 .sound-pad.playing {
   border-color: var(--pad-color);
-  box-shadow: 0 0 18px color-mix(in srgb, var(--pad-color) 55%, transparent),
-              inset 0 0 15px color-mix(in srgb, var(--pad-color) 28%, transparent);
+  box-shadow: 0 0 0 2px var(--pad-color);
 }
 
 .edit-mode .sound-pad {
@@ -476,7 +475,6 @@ input, select, button {
   height: 5px;
   width: 0%;
   background: var(--pad-color, #06b6d4);
-  box-shadow: 0 0 8px var(--pad-color, #06b6d4);
   pointer-events: none;
   z-index: 2;
 }
@@ -938,8 +936,7 @@ input, select, button {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(3, 7, 18, 0.82);
-  backdrop-filter: blur(5px);
+  background: rgba(3, 7, 18, 0.88);
   display: flex;
   align-items: center;
   justify-content: center;

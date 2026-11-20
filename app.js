@@ -210,6 +210,8 @@ class HikarungProApp {
 
     // Active Pad Voices: Map<padId, Set<VoiceObj>>
     this.activePadVoices = new Map();
+    // Cached DOM elements for active pad progress: Map<padId, { bar, timeEl }>
+    this.padDomCache = new Map();
 
     // App State (persisted to IndexedDB)
     this.state = {
@@ -228,10 +230,14 @@ class HikarungProApp {
     // Runtime UI state
     this.isEditMode = false;
     this.isTalkOver = false;
+    this.animFrameId = null;
+    this.bgTimerId = null;
+    this.lastAnimTickMs = 0;
 
     // BGM Player Runtime
     this.bgmPlayer = {
       isPlaying: false,
+      playingPlaylistId: null,
       currentTrackIndex: 0,
       activeNode: null,
       fadingNodes: new Set(),
@@ -560,6 +566,14 @@ class HikarungProApp {
     return this.state.playlists.find((p) => p.id === this.state.currentPlaylistId) || this.state.playlists[0];
   }
 
+  getPlayingPlaylist() {
+    if (this.bgmPlayer.playingPlaylistId) {
+      const found = this.state.playlists.find((p) => p.id === this.bgmPlayer.playingPlaylistId);
+      if (found) return found;
+    }
+    return this.getCurrentPlaylist();
+  }
+
   getVisiblePadCount() {
     const [cols, rows] = this.state.gridSize.split('x').map(Number);
     return cols * rows;
@@ -693,6 +707,7 @@ class HikarungProApp {
     };
 
     this.updatePadVisualState(pad.id);
+    this.wakeAnimationLoop();
   }
 
   stopPadVoices(padId, fadeSec = 0.04) {
@@ -744,9 +759,15 @@ class HikarungProApp {
   }
 
   // ==================== BGM PLAYLIST DECK ENGINE ====================
-  playBgmTrack(index, crossfadeSec = 0) {
+  playBgmTrack(index, crossfadeSec = 0, targetPlaylistId = null) {
     this.ensureAudioContext();
-    const pl = this.getCurrentPlaylist();
+    if (targetPlaylistId) {
+      this.bgmPlayer.playingPlaylistId = targetPlaylistId;
+    } else if (!this.bgmPlayer.playingPlaylistId) {
+      this.bgmPlayer.playingPlaylistId = this.state.currentPlaylistId;
+    }
+
+    const pl = this.getPlayingPlaylist();
     if (!pl || pl.tracks.length === 0) {
       this.showToast('プレイリストに曲がありません。「＋音源ファイル追加」から追加してください');
       return;
@@ -764,6 +785,7 @@ class HikarungProApp {
       this.retireActiveBgmNode(crossfadeSec);
     }
 
+    this.bgmPlayer.playingPlaylistId = pl.id;
     this.bgmPlayer.currentTrackIndex = safeIndex;
     this.bgmPlayer.pausedAtOffset = 0;
     this.startBgmNodeFromOffset(track, buffer, 0, crossfadeSec);
@@ -839,6 +861,7 @@ class HikarungProApp {
     };
 
     this.updateBgmTransportUI();
+    this.wakeAnimationLoop();
   }
 
   retireActiveBgmNode(fadeSec = 0.05) {
@@ -860,11 +883,6 @@ class HikarungProApp {
 
   toggleBgmPlayPause() {
     this.ensureAudioContext();
-    const pl = this.getCurrentPlaylist();
-    if (!pl || pl.tracks.length === 0) {
-      this.showToast('プレイリストに音源を追加してください');
-      return;
-    }
 
     if (this.bgmPlayer.isPlaying && this.bgmPlayer.activeNode) {
       const node = this.bgmPlayer.activeNode;
@@ -873,16 +891,30 @@ class HikarungProApp {
       this.bgmPlayer.pausedAtOffset = Math.min(node.regionDur - 0.05, Math.max(0, elapsedRegion));
       this.retireActiveBgmNode(0.04);
       this.bgmPlayer.isPlaying = false;
-      this.updateBgmTransportUI();
-    } else {
-      const idx = Math.min(this.bgmPlayer.currentTrackIndex, pl.tracks.length - 1);
-      const track = pl.tracks[idx];
-      const buffer = this.audioBuffers.get(track.audioId);
-      if (!buffer) return;
-      this.bgmPlayer.currentTrackIndex = idx;
-      this.startBgmNodeFromOffset(track, buffer, this.bgmPlayer.pausedAtOffset || 0, 0.05);
       this.renderBgmTrackList();
+      this.updateBgmTransportUI();
+      return;
     }
+
+    // Resume paused track in playingPlaylist, or start current viewed playlist if none paused
+    let pl = this.getPlayingPlaylist();
+    if (!this.bgmPlayer.pausedAtOffset || !pl || pl.tracks.length === 0) {
+      this.bgmPlayer.playingPlaylistId = this.state.currentPlaylistId;
+      pl = this.getCurrentPlaylist();
+    }
+    if (!pl || pl.tracks.length === 0) {
+      this.showToast('プレイリストに音源を追加してください');
+      return;
+    }
+
+    const idx = Math.min(this.bgmPlayer.currentTrackIndex, pl.tracks.length - 1);
+    const track = pl.tracks[idx];
+    const buffer = this.audioBuffers.get(track.audioId);
+    if (!buffer) return;
+    this.bgmPlayer.playingPlaylistId = pl.id;
+    this.bgmPlayer.currentTrackIndex = idx;
+    this.startBgmNodeFromOffset(track, buffer, this.bgmPlayer.pausedAtOffset || 0, 0.05);
+    this.renderBgmTrackList();
   }
 
   fadeStopBgm(fadeSecOverride = null) {
@@ -890,6 +922,7 @@ class HikarungProApp {
     this.bgmPlayer.pausedAtOffset = 0;
     this.bgmPlayer.isPlaying = false;
     this.retireActiveBgmNode(fadeSec);
+    this.renderBgmTrackList();
     this.updateBgmTransportUI();
   }
 
@@ -901,6 +934,7 @@ class HikarungProApp {
       try { fn.source.stop(); } catch (_) { }
     }
     this.bgmPlayer.fadingNodes.clear();
+    this.renderBgmTrackList();
     this.updateBgmTransportUI();
   }
 
@@ -910,9 +944,10 @@ class HikarungProApp {
   }
 
   advanceBgmTrack(crossfadeSec = 0) {
-    const pl = this.getCurrentPlaylist();
+    const pl = this.getPlayingPlaylist();
     if (!pl || pl.tracks.length === 0) {
       this.bgmPlayer.isPlaying = false;
+      this.renderBgmTrackList();
       this.updateBgmTransportUI();
       return;
     }
@@ -923,12 +958,13 @@ class HikarungProApp {
     if (mode === 'single') {
       this.bgmPlayer.isPlaying = false;
       this.bgmPlayer.pausedAtOffset = 0;
+      this.renderBgmTrackList();
       this.updateBgmTransportUI();
       return;
     }
 
     if (mode === 'one_loop') {
-      this.playBgmTrack(cur, crossfadeSec);
+      this.playBgmTrack(cur, crossfadeSec, pl.id);
       return;
     }
 
@@ -937,7 +973,7 @@ class HikarungProApp {
       if (pl.tracks.length > 1 && nextIdx === cur) {
         nextIdx = (cur + 1) % pl.tracks.length;
       }
-      this.playBgmTrack(nextIdx, crossfadeSec);
+      this.playBgmTrack(nextIdx, crossfadeSec, pl.id);
       return;
     }
 
@@ -945,14 +981,15 @@ class HikarungProApp {
       if (cur + 1 >= pl.tracks.length) {
         this.bgmPlayer.isPlaying = false;
         this.bgmPlayer.pausedAtOffset = 0;
+        this.renderBgmTrackList();
         this.updateBgmTransportUI();
         return;
       }
-      this.playBgmTrack(cur + 1, crossfadeSec);
+      this.playBgmTrack(cur + 1, crossfadeSec, pl.id);
       return;
     }
 
-    this.playBgmTrack((cur + 1) % pl.tracks.length, crossfadeSec);
+    this.playBgmTrack((cur + 1) % pl.tracks.length, crossfadeSec, pl.id);
   }
 
   getBgmTrackTiming(track, ratio = null) {
@@ -982,7 +1019,7 @@ class HikarungProApp {
   }
 
   previewSeekBgmByRatio(ratio, showTenths = true) {
-    const pl = this.getCurrentPlaylist();
+    const pl = this.getPlayingPlaylist();
     if (!pl || pl.tracks.length === 0) return;
     const track = pl.tracks[this.bgmPlayer.currentTrackIndex];
     const info = this.getBgmTrackTiming(track, ratio);
@@ -996,7 +1033,7 @@ class HikarungProApp {
   }
 
   seekBgmToRatio(ratio) {
-    const pl = this.getCurrentPlaylist();
+    const pl = this.getPlayingPlaylist();
     if (!pl || pl.tracks.length === 0) return;
     const track = pl.tracks[this.bgmPlayer.currentTrackIndex];
     const info = this.getBgmTrackTiming(track, ratio);
@@ -1014,86 +1051,146 @@ class HikarungProApp {
     }
   }
 
-  // ==================== ANIMATION LOOP ====================
+  // ==================== POWER-SAVING ON-DEMAND ANIMATION LOOP ====================
   startAnimationLoop() {
-    const tick = () => {
-      if (this.audioCtx) {
-        const now = this.audioCtx.currentTime;
+    // Suspend AudioContext when tab/screen is locked AND nothing is playing to save iPad battery
+    document.addEventListener('visibilitychange', () => {
+      if (!this.audioCtx) return;
+      const anyPlaying = this.activePadVoices.size > 0 || this.bgmPlayer.isPlaying || Boolean(this.previewVoice);
+      if (document.hidden && !anyPlaying && this.audioCtx.state === 'running') {
+        this.audioCtx.suspend().catch(() => {});
+      } else if (!document.hidden && this.audioCtx.state === 'suspended') {
+        this.audioCtx.resume().catch(() => {});
+        this.wakeAnimationLoop();
+      }
+    });
+    this.wakeAnimationLoop();
+  }
 
-        const bank = this.getCurrentBank();
-        if (bank) {
-          for (const pad of bank.pads) {
-            const voices = this.activePadVoices.get(pad.id);
-            if (voices && voices.size > 0) {
-              let latest = null;
-              for (const v of voices) latest = v;
-              if (latest) {
-                const elapsedWall = now - latest.startedAt;
-                let progress = 0;
-                let remainWall = 0;
-                if (latest.isLoop) {
-                  const cycleWall = latest.playWallDuration;
-                  const inCycle = elapsedWall % cycleWall;
-                  progress = (inCycle / cycleWall) * 100;
-                  remainWall = cycleWall - inCycle;
-                } else {
-                  progress = Math.min(100, (elapsedWall / latest.playWallDuration) * 100);
-                  remainWall = Math.max(0, latest.playWallDuration - elapsedWall);
-                }
+  wakeAnimationLoop() {
+    if (this.animFrameId !== null || this.bgTimerId !== null) return;
+    const step = (nowMs) => {
+      this.animFrameId = null;
+      this.bgTimerId = null;
+      this.runAnimationTick(nowMs || performance.now());
+    };
+    this.animFrameId = requestAnimationFrame(step);
+  }
 
-                const padEl = document.querySelector(`.sound-pad[data-pad-id="${pad.id}"]`);
-                if (padEl) {
-                  const bar = padEl.querySelector('.pad-progress-bar');
-                  const timeEl = padEl.querySelector('.pad-time');
-                  if (bar) bar.style.width = `${progress.toFixed(1)}%`;
-                  if (timeEl) timeEl.textContent = `-${this.formatSeconds(remainWall, true)}`;
-                }
-              }
-            }
+  runAnimationTick(nowMs) {
+    const hasPads = this.activePadVoices.size > 0;
+    const hasBgm = Boolean(this.bgmPlayer.isPlaying && this.bgmPlayer.activeNode);
+    const hasPreview = Boolean(this.previewVoice && !document.getElementById('editorModal').classList.contains('hidden'));
+
+    // COMPLETE IDLE SLEEP: 0% CPU/GPU usage when no sound is playing
+    if (!hasPads && !hasBgm && !hasPreview) {
+      return;
+    }
+
+    // Throttle interval: 60ms (~16fps) when SE pads/preview are active, 250ms (4fps) when ONLY BGM is playing
+    const minIntervalMs = (hasPads || hasPreview) ? 60 : 250;
+
+    if (this.audioCtx && (nowMs - this.lastAnimTickMs >= minIntervalMs)) {
+      this.lastAnimTickMs = nowMs;
+      const now = this.audioCtx.currentTime;
+
+      // 1. Update active SE Pads using cached DOM elements (zero querySelector calls)
+      if (hasPads && !document.hidden) {
+        for (const [padId, voices] of this.activePadVoices.entries()) {
+          if (!voices || voices.size === 0) continue;
+          const cached = this.padDomCache.get(padId);
+          if (!cached) continue;
+
+          let latest = null;
+          for (const v of voices) latest = v;
+          if (!latest) continue;
+
+          const elapsedWall = now - latest.startedAt;
+          let progress = 0;
+          let remainWall = 0;
+          if (latest.isLoop) {
+            const cycleWall = latest.playWallDuration;
+            const inCycle = elapsedWall % cycleWall;
+            progress = (inCycle / cycleWall) * 100;
+            remainWall = cycleWall - inCycle;
+          } else {
+            progress = Math.min(100, (elapsedWall / latest.playWallDuration) * 100);
+            remainWall = Math.max(0, latest.playWallDuration - elapsedWall);
           }
-        }
 
-        if (this.bgmPlayer.isPlaying && this.bgmPlayer.activeNode) {
-          const node = this.bgmPlayer.activeNode;
-          const elapsedWall = now - node.startedAtCtxTime;
-          const curRegionOffset = Math.min(node.regionDur, node.initialRegionOffset + elapsedWall * node.effectiveRate);
-          const totalWall = node.regionDur / node.effectiveRate;
-          const curWall = curRegionOffset / node.effectiveRate;
-          const remainWall = Math.max(0, totalWall - curWall);
-
-          if (!this.bgmPlayer.isSeeking) {
-            const timeLabel = document.getElementById('bgmNowTime');
-            if (timeLabel) {
-              timeLabel.textContent = `${this.formatSeconds(curWall, false)} / -${this.formatSeconds(remainWall, false)}`;
-            }
-
-            const seekSlider = document.getElementById('sliderBgmSeek');
-            if (seekSlider) {
-              seekSlider.value = Math.round((curRegionOffset / node.regionDur) * 1000);
-            }
+          const widthStr = `${progress.toFixed(1)}%`;
+          if (cached.bar && cached.bar._lastW !== widthStr) {
+            cached.bar._lastW = widthStr;
+            cached.bar.style.width = widthStr;
           }
-
-          const xfadeSec = Number(this.state.bgmXfade) || 0;
-          if (
-            xfadeSec > 0.1 &&
-            !this.bgmPlayer.isCrossfadingNext &&
-            this.state.bgmMode !== 'single' &&
-            totalWall > xfadeSec * 1.8 &&
-            remainWall <= xfadeSec
-          ) {
-            this.bgmPlayer.isCrossfadingNext = true;
-            this.advanceBgmTrack(xfadeSec);
+          const timeStr = `-${this.formatSeconds(remainWall, true)}`;
+          if (cached.timeEl && cached.timeEl._lastT !== timeStr) {
+            cached.timeEl._lastT = timeStr;
+            cached.timeEl.textContent = timeStr;
           }
         }
       }
 
-      if (this.previewVoice && !document.getElementById('editorModal').classList.contains('hidden')) {
+      // 2. Update BGM Now Playing & Auto-Crossfade check
+      if (hasBgm) {
+        const node = this.bgmPlayer.activeNode;
+        const elapsedWall = now - node.startedAtCtxTime;
+        const curRegionOffset = Math.min(node.regionDur, node.initialRegionOffset + elapsedWall * node.effectiveRate);
+        const totalWall = node.regionDur / node.effectiveRate;
+        const curWall = curRegionOffset / node.effectiveRate;
+        const remainWall = Math.max(0, totalWall - curWall);
+
+        if (!this.bgmPlayer.isSeeking && !document.hidden) {
+          const timeLabel = document.getElementById('bgmNowTime');
+          if (timeLabel) {
+            const newTimeText = `${this.formatSeconds(curWall, false)} / -${this.formatSeconds(remainWall, false)}`;
+            if (timeLabel._lastT !== newTimeText) {
+              timeLabel._lastT = newTimeText;
+              timeLabel.textContent = newTimeText;
+            }
+          }
+
+          const seekSlider = document.getElementById('sliderBgmSeek');
+          if (seekSlider) {
+            const newVal = String(Math.round((curRegionOffset / node.regionDur) * 1000));
+            if (seekSlider._lastV !== newVal) {
+              seekSlider._lastV = newVal;
+              seekSlider.value = newVal;
+            }
+          }
+        }
+
+        const xfadeSec = Number(this.state.bgmXfade) || 0;
+        if (
+          xfadeSec > 0.1 &&
+          !this.bgmPlayer.isCrossfadingNext &&
+          this.state.bgmMode !== 'single' &&
+          totalWall > xfadeSec * 1.8 &&
+          remainWall <= xfadeSec
+        ) {
+          this.bgmPlayer.isCrossfadingNext = true;
+          this.advanceBgmTrack(xfadeSec);
+        }
+      }
+
+      // 3. Editor Preview playhead
+      if (hasPreview && !document.hidden) {
         this.drawEditorWaveform();
       }
+    }
 
-      requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
+    // Schedule next tick: use low-power 250ms timer when only BGM is playing (or screen hidden), rAF only when SE pads are active
+    if (document.hidden || (!hasPads && !hasPreview && hasBgm)) {
+      this.bgTimerId = setTimeout(() => {
+        this.bgTimerId = null;
+        this.runAnimationTick(performance.now());
+      }, 250);
+    } else {
+      this.animFrameId = requestAnimationFrame((nextMs) => {
+        this.animFrameId = null;
+        this.runAnimationTick(nextMs);
+      });
+    }
   }
 
   // ==================== UI RENDERING ====================
@@ -1144,6 +1241,7 @@ class HikarungProApp {
     const grid = document.getElementById('padGrid');
     grid.className = `pad-grid grid-${this.state.gridSize} ${this.isEditMode ? 'edit-mode' : ''}`;
     grid.innerHTML = '';
+    this.padDomCache.clear();
 
     const bank = this.getCurrentBank();
     if (!bank) return;
@@ -1334,6 +1432,10 @@ class HikarungProApp {
       padEl.addEventListener('pointerleave', handleGateRelease);
 
       grid.appendChild(padEl);
+      this.padDomCache.set(pad.id, {
+        bar: padEl.querySelector('.pad-progress-bar'),
+        timeEl: padEl.querySelector('.pad-time')
+      });
     }
   }
 
@@ -1404,8 +1506,11 @@ class HikarungProApp {
       return;
     }
 
+    const activePlaylistId = this.bgmPlayer.playingPlaylistId || this.state.currentPlaylistId;
+    const isPlayingPlaylist = pl.id === activePlaylistId;
+
     pl.tracks.forEach((trk, idx) => {
-      const isCurrent = idx === this.bgmPlayer.currentTrackIndex;
+      const isCurrent = isPlayingPlaylist && idx === this.bgmPlayer.currentTrackIndex;
       const dur = this.getPadTrimmedDuration(trk);
       const item = document.createElement('div');
       item.className = `bgm-track-item ${isCurrent ? 'active' : ''}`;
@@ -1427,7 +1532,7 @@ class HikarungProApp {
 
       item.querySelector('.bgm-track-left').addEventListener('click', () => {
         const xfade = this.bgmPlayer.isPlaying ? Number(this.state.bgmXfade) || 0 : 0;
-        this.playBgmTrack(idx, xfade);
+        this.playBgmTrack(idx, xfade, pl.id);
       });
 
       item.querySelector('.btn-trk-edit').addEventListener('click', (e) => {
@@ -1441,8 +1546,10 @@ class HikarungProApp {
         const tmp = pl.tracks[idx - 1];
         pl.tracks[idx - 1] = pl.tracks[idx];
         pl.tracks[idx] = tmp;
-        if (this.bgmPlayer.currentTrackIndex === idx) this.bgmPlayer.currentTrackIndex = idx - 1;
-        else if (this.bgmPlayer.currentTrackIndex === idx - 1) this.bgmPlayer.currentTrackIndex = idx;
+        if (isPlayingPlaylist) {
+          if (this.bgmPlayer.currentTrackIndex === idx) this.bgmPlayer.currentTrackIndex = idx - 1;
+          else if (this.bgmPlayer.currentTrackIndex === idx - 1) this.bgmPlayer.currentTrackIndex = idx;
+        }
         this.saveAppState();
         this.renderBgmTrackList();
       });
@@ -1453,17 +1560,27 @@ class HikarungProApp {
         const tmp = pl.tracks[idx + 1];
         pl.tracks[idx + 1] = pl.tracks[idx];
         pl.tracks[idx] = tmp;
-        if (this.bgmPlayer.currentTrackIndex === idx) this.bgmPlayer.currentTrackIndex = idx + 1;
-        else if (this.bgmPlayer.currentTrackIndex === idx + 1) this.bgmPlayer.currentTrackIndex = idx;
+        if (isPlayingPlaylist) {
+          if (this.bgmPlayer.currentTrackIndex === idx) this.bgmPlayer.currentTrackIndex = idx + 1;
+          else if (this.bgmPlayer.currentTrackIndex === idx + 1) this.bgmPlayer.currentTrackIndex = idx;
+        }
         this.saveAppState();
         this.renderBgmTrackList();
       });
 
       item.querySelector('.btn-trk-del').addEventListener('click', (e) => {
         e.stopPropagation();
+        const deletingPlayingTrack = isPlayingPlaylist && this.bgmPlayer.isPlaying && this.bgmPlayer.currentTrackIndex === idx;
+        if (deletingPlayingTrack) {
+          this.stopBgmImmediately();
+        }
         pl.tracks.splice(idx, 1);
-        if (this.bgmPlayer.currentTrackIndex >= pl.tracks.length) {
-          this.bgmPlayer.currentTrackIndex = Math.max(0, pl.tracks.length - 1);
+        if (isPlayingPlaylist) {
+          if (idx < this.bgmPlayer.currentTrackIndex) {
+            this.bgmPlayer.currentTrackIndex = Math.max(0, this.bgmPlayer.currentTrackIndex - 1);
+          } else if (this.bgmPlayer.currentTrackIndex >= pl.tracks.length) {
+            this.bgmPlayer.currentTrackIndex = Math.max(0, pl.tracks.length - 1);
+          }
         }
         this.saveAppState();
         this.renderPlaylistSelector();
@@ -1480,19 +1597,31 @@ class HikarungProApp {
     const titleEl = document.getElementById('bgmNowTitle');
     const timeLabel = document.getElementById('bgmNowTime');
     const seekSlider = document.getElementById('sliderBgmSeek');
-    const pl = this.getCurrentPlaylist();
-    const track = pl && pl.tracks[this.bgmPlayer.currentTrackIndex];
+    const playingPl = this.getPlayingPlaylist();
+    const viewedPl = this.getCurrentPlaylist();
+    const isViewingOtherPl = Boolean(playingPl && viewedPl && playingPl.id !== viewedPl.id);
+    const track = playingPl && playingPl.tracks[this.bgmPlayer.currentTrackIndex];
 
     if (this.bgmPlayer.isPlaying && track) {
       playBtn.textContent = '⏸ 一時停止';
       playBtn.classList.add('playing');
-      titleEl.textContent = `♪ ${track.name}`;
+      titleEl.textContent = isViewingOtherPl
+        ? `♪ ${track.name}（${playingPl.name}）`
+        : `♪ ${track.name}`;
     } else {
       playBtn.textContent = '▶ 再生';
       playBtn.classList.remove('playing');
-      titleEl.textContent = track ? `待機中: ${track.name}` : '曲を選択または追加してください';
-      if (track) {
-        const info = this.getBgmTrackTiming(track, null);
+      const standbyTrack = (this.bgmPlayer.pausedAtOffset > 0 && track)
+        ? track
+        : (viewedPl && viewedPl.tracks[0]);
+      const standbyPl = (this.bgmPlayer.pausedAtOffset > 0 && track) ? playingPl : viewedPl;
+      const showOtherTag = Boolean(this.bgmPlayer.pausedAtOffset > 0 && standbyPl && viewedPl && standbyPl.id !== viewedPl.id);
+
+      titleEl.textContent = standbyTrack
+        ? `${this.bgmPlayer.pausedAtOffset > 0 ? '一時停止' : '待機中'}: ${standbyTrack.name}${showOtherTag ? `（${standbyPl.name}）` : ''}`
+        : '曲を選択または追加してください';
+      if (standbyTrack) {
+        const info = this.getBgmTrackTiming(standbyTrack, this.bgmPlayer.pausedAtOffset > 0 ? null : 0);
         if (info) {
           if (timeLabel && !this.bgmPlayer.isSeeking) {
             timeLabel.textContent = `${this.formatSeconds(info.curWall, false)} / -${this.formatSeconds(info.remainWall, false)}`;
@@ -1839,6 +1968,7 @@ class HikarungProApp {
       this.previewVoice = null;
       this.drawEditorWaveform();
     };
+    this.wakeAnimationLoop();
   }
 
   stopEditorPreview() {
@@ -2103,7 +2233,11 @@ class HikarungProApp {
 
     document.getElementById('selectPlaylist').addEventListener('change', (e) => {
       this.state.currentPlaylistId = e.target.value;
-      this.bgmPlayer.currentTrackIndex = 0;
+      if (!this.bgmPlayer.isPlaying) {
+        this.bgmPlayer.playingPlaylistId = this.state.currentPlaylistId;
+        this.bgmPlayer.currentTrackIndex = 0;
+        this.bgmPlayer.pausedAtOffset = 0;
+      }
       this.saveAppState();
       this.renderBgmTrackList();
       this.updateBgmTransportUI();
@@ -2115,9 +2249,15 @@ class HikarungProApp {
       const pl = { id: `pl_${Date.now()}`, name: name.trim(), tracks: [] };
       this.state.playlists.push(pl);
       this.state.currentPlaylistId = pl.id;
+      if (!this.bgmPlayer.isPlaying) {
+        this.bgmPlayer.playingPlaylistId = pl.id;
+        this.bgmPlayer.currentTrackIndex = 0;
+        this.bgmPlayer.pausedAtOffset = 0;
+      }
       this.saveAppState();
       this.renderPlaylistSelector();
       this.renderBgmTrackList();
+      this.updateBgmTransportUI();
     });
 
     document.getElementById('btnRenamePlaylist').addEventListener('click', () => {
@@ -2128,6 +2268,7 @@ class HikarungProApp {
       pl.name = name.trim();
       this.saveAppState();
       this.renderPlaylistSelector();
+      this.updateBgmTransportUI();
     });
 
     document.getElementById('btnDeletePlaylist').addEventListener('click', () => {
@@ -2137,11 +2278,19 @@ class HikarungProApp {
       }
       const pl = this.getCurrentPlaylist();
       if (!confirm(`プレイリスト「${pl.name}」を削除しますか？`)) return;
+      if (this.bgmPlayer.playingPlaylistId === pl.id) {
+        this.stopBgmImmediately();
+      }
       this.state.playlists = this.state.playlists.filter((p) => p.id !== pl.id);
       this.state.currentPlaylistId = this.state.playlists[0].id;
+      if (!this.bgmPlayer.isPlaying) {
+        this.bgmPlayer.playingPlaylistId = this.state.currentPlaylistId;
+        this.bgmPlayer.currentTrackIndex = 0;
+      }
       this.saveAppState();
       this.renderPlaylistSelector();
       this.renderBgmTrackList();
+      this.updateBgmTransportUI();
     });
 
     document.getElementById('btnAddBgmFiles').addEventListener('click', () => {
@@ -2187,16 +2336,16 @@ class HikarungProApp {
       this.fadeStopBgm();
     });
     document.getElementById('btnBgmPrev').addEventListener('click', () => {
-      const pl = this.getCurrentPlaylist();
+      const pl = this.getPlayingPlaylist();
       if (!pl || pl.tracks.length === 0) return;
       const xfade = this.bgmPlayer.isPlaying ? Number(this.state.bgmXfade) || 0 : 0;
-      this.playBgmTrack(this.bgmPlayer.currentTrackIndex - 1, xfade);
+      this.playBgmTrack(this.bgmPlayer.currentTrackIndex - 1, xfade, pl.id);
     });
     document.getElementById('btnBgmNext').addEventListener('click', () => {
-      const pl = this.getCurrentPlaylist();
+      const pl = this.getPlayingPlaylist();
       if (!pl || pl.tracks.length === 0) return;
       const xfade = this.bgmPlayer.isPlaying ? Number(this.state.bgmXfade) || 0 : 0;
-      this.playBgmTrack(this.bgmPlayer.currentTrackIndex + 1, xfade);
+      this.playBgmTrack(this.bgmPlayer.currentTrackIndex + 1, xfade, pl.id);
     });
 
     const seekSliderEl = document.getElementById('sliderBgmSeek');
