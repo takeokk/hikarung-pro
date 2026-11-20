@@ -2041,6 +2041,8 @@ class HikarungProApp {
     this.animFrameId = null;
     this.bgTimerId = null;
     this.lastAnimTickMs = 0;
+    this.bgKeepAliveAudio = null;
+    this.bgKeepAliveStopTimer = null;
 
     // BGM Player Runtime
     this.bgmPlayer = {
@@ -2122,11 +2124,136 @@ class HikarungProApp {
         src.connect(this.audioCtx.destination);
         src.start(0);
       } catch (_) { }
+
+      this.initBackgroundAudioKeepAlive();
     }
     if (this.audioCtx.state === 'suspended') {
       this.audioCtx.resume();
     }
     return this.audioCtx;
+  }
+
+  /**
+   * Creates an inaudible (-90dBFS) HTML5 <audio loop> bridge so iPadOS keeps
+   * Web Audio API (AudioContext) and BGM playlist transitions running even when
+   * switching to another app (background) or locking the screen.
+   */
+  initBackgroundAudioKeepAlive() {
+    if (this.bgKeepAliveAudio) return;
+    try {
+      const sr = 8000;
+      const numSamples = sr; // 1.0 second loop
+      const buf = new ArrayBuffer(44 + numSamples * 2);
+      const view = new DataView(buf);
+      const writeStr = (off, s) => {
+        for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+      };
+      writeStr(0, 'RIFF');
+      view.setUint32(4, 36 + numSamples * 2, true);
+      writeStr(8, 'WAVEfmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sr, true);
+      view.setUint32(28, sr * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeStr(36, 'data');
+      view.setUint32(40, numSamples * 2, true);
+      // 1-LSB (-90dBFS) alternating value prevents iOS from optimizing away pure-zero streams
+      for (let i = 0; i < numSamples; i++) {
+        view.setInt16(44 + i * 2, (i & 1) ? 1 : -1, true);
+      }
+
+      const b64 = this.arrayBufferToBase64(buf);
+      const audio = new Audio(`data:audio/wav;base64,${b64}`);
+      audio.loop = true;
+      audio.volume = 0.01;
+      audio.setAttribute('playsinline', 'true');
+      audio.setAttribute('webkit-playsinline', 'true');
+
+      // Use HTML5 audio timeupdate in background to drive BGM crossfades & AudioContext resume
+      audio.addEventListener('timeupdate', () => {
+        if (this.audioCtx && this.audioCtx.state === 'suspended') {
+          this.audioCtx.resume().catch(() => {});
+        }
+        if (document.hidden) {
+          this.runAnimationTick(performance.now());
+        }
+      });
+
+      this.bgKeepAliveAudio = audio;
+      this.setupMediaSessionHandlers();
+    } catch (_) {}
+  }
+
+  activateBackgroundKeepAlive() {
+    this.initBackgroundAudioKeepAlive();
+    if (this.bgKeepAliveStopTimer) {
+      clearTimeout(this.bgKeepAliveStopTimer);
+      this.bgKeepAliveStopTimer = null;
+    }
+    if (this.bgKeepAliveAudio && this.bgKeepAliveAudio.paused) {
+      this.bgKeepAliveAudio.play().catch(() => {});
+    }
+    this.updateMediaSessionMetadata();
+  }
+
+  scheduleStopBackgroundKeepAliveIfIdle() {
+    if (this.bgKeepAliveStopTimer) clearTimeout(this.bgKeepAliveStopTimer);
+    this.bgKeepAliveStopTimer = setTimeout(() => {
+      this.bgKeepAliveStopTimer = null;
+      const anyPlaying = this.activePadVoices.size > 0 || this.bgmPlayer.isPlaying || Boolean(this.previewVoice);
+      if (!anyPlaying && this.bgKeepAliveAudio && !this.bgKeepAliveAudio.paused) {
+        this.bgKeepAliveAudio.pause();
+      }
+    }, 2500);
+  }
+
+  setupMediaSessionHandlers() {
+    if (!('mediaSession' in navigator)) return;
+    try {
+      navigator.mediaSession.setActionHandler('play', () => {
+        if (!this.bgmPlayer.isPlaying) this.toggleBgmPlayPause();
+      });
+      navigator.mediaSession.setActionHandler('pause', () => {
+        if (this.bgmPlayer.isPlaying) this.toggleBgmPlayPause();
+      });
+      navigator.mediaSession.setActionHandler('previoustrack', () => {
+        const pl = this.getPlayingPlaylist();
+        if (pl && pl.tracks.length > 0) {
+          const xfade = this.bgmPlayer.isPlaying ? Number(this.state.bgmXfade) || 0 : 0;
+          this.playBgmTrack(this.bgmPlayer.currentTrackIndex - 1, xfade, pl.id);
+        }
+      });
+      navigator.mediaSession.setActionHandler('nexttrack', () => {
+        const pl = this.getPlayingPlaylist();
+        if (pl && pl.tracks.length > 0) {
+          const xfade = this.bgmPlayer.isPlaying ? Number(this.state.bgmXfade) || 0 : 0;
+          this.playBgmTrack(this.bgmPlayer.currentTrackIndex + 1, xfade, pl.id);
+        }
+      });
+    } catch (_) {}
+  }
+
+  updateMediaSessionMetadata() {
+    if (!('mediaSession' in navigator) || typeof MediaMetadata === 'undefined') return;
+    try {
+      const pl = this.getPlayingPlaylist();
+      const track = pl && pl.tracks[this.bgmPlayer.currentTrackIndex];
+      const title = (this.bgmPlayer.isPlaying && track)
+        ? track.name
+        : 'HIKARUNG-PRO (再生中)';
+      const artist = (this.bgmPlayer.isPlaying && pl) ? pl.name : 'HIKARUNG-PRO';
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title,
+        artist,
+        album: 'HIKARUNG-PRO'
+      });
+      navigator.mediaSession.playbackState = (this.bgmPlayer.isPlaying || this.activePadVoices.size > 0)
+        ? 'playing'
+        : 'paused';
+    } catch (_) {}
   }
 
   getDecodeContext() {
@@ -2515,6 +2642,7 @@ class HikarungProApp {
     };
 
     this.updatePadVisualState(pad.id);
+    this.activateBackgroundKeepAlive();
     this.wakeAnimationLoop();
   }
 
@@ -2669,6 +2797,7 @@ class HikarungProApp {
     };
 
     this.updateBgmTransportUI();
+    this.activateBackgroundKeepAlive();
     this.wakeAnimationLoop();
   }
 
@@ -2861,14 +2990,16 @@ class HikarungProApp {
 
   // ==================== POWER-SAVING ON-DEMAND ANIMATION LOOP ====================
   startAnimationLoop() {
-    // Suspend AudioContext when tab/screen is locked AND nothing is playing to save iPad battery
+    // Keep AudioContext alive when going to background if sounds are playing, or resume when returning
     document.addEventListener('visibilitychange', () => {
       if (!this.audioCtx) return;
       const anyPlaying = this.activePadVoices.size > 0 || this.bgmPlayer.isPlaying || Boolean(this.previewVoice);
-      if (document.hidden && !anyPlaying && this.audioCtx.state === 'running') {
-        this.audioCtx.suspend().catch(() => {});
-      } else if (!document.hidden && this.audioCtx.state === 'suspended') {
+      if (anyPlaying && this.audioCtx.state === 'suspended') {
         this.audioCtx.resume().catch(() => {});
+      } else if (!document.hidden) {
+        if (this.audioCtx.state === 'suspended') {
+          this.audioCtx.resume().catch(() => {});
+        }
         this.wakeAnimationLoop();
       }
     });
@@ -2892,6 +3023,7 @@ class HikarungProApp {
 
     // COMPLETE IDLE SLEEP: 0% CPU/GPU usage when no sound is playing
     if (!hasPads && !hasBgm && !hasPreview) {
+      this.scheduleStopBackgroundKeepAliveIfIdle();
       return;
     }
 
