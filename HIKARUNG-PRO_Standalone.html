@@ -1360,6 +1360,36 @@ input, select, button {
   color: #38bdf8;
 }
 
+.menu-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.version-badge {
+  background: rgba(6, 182, 212, 0.2);
+  border: 1px solid var(--accent-cyan);
+  color: #67e8f9;
+  font-size: 0.76rem;
+  font-weight: 800;
+  padding: 2px 9px;
+  border-radius: 99px;
+  font-variant-numeric: tabular-nums;
+}
+
+.version-detail {
+  font-size: 0.78rem;
+  font-weight: 800;
+  color: #34d399;
+  background: rgba(16, 185, 129, 0.14);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  padding: 3px 9px;
+  border-radius: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
 .section-desc {
   font-size: 0.8rem;
   color: var(--text-sub);
@@ -1774,19 +1804,35 @@ input, select, button {
   <div id="menuModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
     <div class="modal-card menu-modal-card">
       <div class="modal-header">
-        <h2 class="modal-title">💾 HIKARUNG-PRO 管理メニュー</h2>
+        <div class="modal-title-group">
+          <h2 class="modal-title">💾 HIKARUNG-PRO 管理メニュー</h2>
+          <span id="menuVersionBadge" class="version-badge">v2.8.0</span>
+        </div>
         <button id="btnCloseMenuModal" class="btn-close" type="button">✕</button>
       </div>
       <div class="modal-body menu-body">
         <div class="menu-section">
-          <h3>🔄 アプリ本体の更新（ホーム画面から消さずに更新）</h3>
-          <p class="section-desc">PC側でアプリを改修した際、Tailscaleや自宅Wi-Fiに繋がった状態で下のボタンを押すと、<strong>登録した音源や設定を残したままアプリ本体だけを最新版に更新</strong>します。</p>
+          <div class="menu-section-head">
+            <h3>🔄 アプリ本体の更新（データ保持アップデート）</h3>
+            <span id="menuVersionDetail" class="version-detail">現在のバージョン: v2.8.0</span>
+          </div>
+          <p class="section-desc">通信可能な状態（GitHub / Tailscale / Wi-Fi接続時）で下のボタンを押すと、<strong>iPad内に登録した音源やパッド・プレイリストの設定を残したまま、アプリ本体（キャッシュ）だけを最新版に更新</strong>します。</p>
           <button id="btnUpdateAppCache" class="btn-primary-lg" type="button">🔄 アプリ本体を最新に更新して再読み込み</button>
         </div>
 
         <div class="menu-section">
+          <h3>💡 クイック操作ガイド（最新仕様）</h3>
+          <ul class="guide-steps">
+            <li><strong>パッド編集＆場所入替:</strong> 上部の「🛠️ 編集 EDIT」モード時、<strong>短くタップ</strong>で波形トリミング・音量（最大300%）・フェード編集を開き、<strong>長押し（ロングタップ）＋スワイプ</strong>でパッドの位置を入れ替えられます。</li>
+            <li><strong>30秒以上の音源登録:</strong> パッドに30秒以上の長尺音源を追加すると、自動的に発音モードが <code>X-FADE（クロスフェード）</code> に初期設定されます。</li>
+            <li><strong>BGMデッキ＆秒数シーク:</strong> シークバーを左右にドラッグして0.1秒単位で再生位置を探せます。再生中に別プレイリストを開いて曲の確認・編集も可能です。</li>
+            <li><strong>裏画面（バックグラウンド）再生＆省電力:</strong> 再生中に別アプリやロック画面へ移っても音が途切れず継続し、無音待機中は描画ループを完全停止してバッテリー消費を抑えます。</li>
+          </ul>
+        </div>
+
+        <div class="menu-section">
           <h3>📦 プロジェクト全体のバックアップ保存・復元</h3>
-          <p class="section-desc">全バンクのパッド設定、プレイリスト、取り込んだ音源データ自体を1つのファイル（<code>.json</code>）としてiPadの「ファイル」やPCに書き出し・復元できます。</p>
+          <p class="section-desc">全バンクのパッド設定、プレイリスト、取り込んだ音源データ自体を1つのファイル（<code>.json</code>）としてiPadの「ファイル」アプリやPCに書き出し・復元できます。</p>
           <div class="backup-btn-row">
             <button id="btnExportBackup" class="btn-secondary-lg" type="button">⬇️ 全データをファイルに書き出す (Export)</button>
             <button id="btnImportBackup" class="btn-secondary-lg" type="button">⬆️ バックアップファイルを読み込む (Import)</button>
@@ -1795,7 +1841,8 @@ input, select, button {
 
         <div class="menu-section danger-zone">
           <h3>⚠️ 全データの初期化</h3>
-          <button id="btnFactoryReset" class="btn-danger-outline" type="button">すべての音源・設定を初期状態（空）に戻す</button>
+          <p class="section-desc">追加・編集したすべての音源と設定を消去し、初期サンプル（6音源）のみが登録された工場出荷状態へ戻します。</p>
+          <button id="btnFactoryReset" class="btn-danger-outline" type="button">すべての音源・設定を初期状態（初期サンプル構成）に戻す</button>
         </div>
       </div>
     </div>
@@ -1810,6 +1857,8 @@ window.__EMBEDDED_INITIAL_SAMPLES_B64__ = {"01_タイトル決定音_ジャン.w
  * HIKARUNG-PRO - Offline-First iPad Sound Cue & BGM Playlist Deck
  * Zero external dependencies. Web Audio API + IndexedDB + Service Worker.
  */
+
+const APP_VERSION = 'v2.8.0';
 
 const PAD_COLORS = [
   { id: 'cyan', hex: '#06b6d4', label: 'シアン' },
@@ -3144,6 +3193,11 @@ class HikarungProApp {
   }
 
   renderTopBarState() {
+    const vBadge = document.getElementById('menuVersionBadge');
+    const vDetail = document.getElementById('menuVersionDetail');
+    if (vBadge) vBadge.textContent = APP_VERSION;
+    if (vDetail) vDetail.textContent = `現在のバージョン: ${APP_VERSION}`;
+
     document.getElementById('btnModeLive').classList.toggle('active', !this.isEditMode);
     document.getElementById('btnModeEdit').classList.toggle('active', this.isEditMode);
     document.getElementById('padGrid').classList.toggle('edit-mode', this.isEditMode);

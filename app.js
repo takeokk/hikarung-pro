@@ -3,6 +3,8 @@
  * Zero external dependencies. Web Audio API + IndexedDB + Service Worker.
  */
 
+const APP_VERSION = 'v2.8.0';
+
 const PAD_COLORS = [
   { id: 'cyan', hex: '#06b6d4', label: 'シアン' },
   { id: 'emerald', hex: '#10b981', label: 'エメラルド' },
@@ -1336,6 +1338,11 @@ class HikarungProApp {
   }
 
   renderTopBarState() {
+    const vBadge = document.getElementById('menuVersionBadge');
+    const vDetail = document.getElementById('menuVersionDetail');
+    if (vBadge) vBadge.textContent = APP_VERSION;
+    if (vDetail) vDetail.textContent = `現在のバージョン: ${APP_VERSION}`;
+
     document.getElementById('btnModeLive').classList.toggle('active', !this.isEditMode);
     document.getElementById('btnModeEdit').classList.toggle('active', this.isEditMode);
     document.getElementById('padGrid').classList.toggle('edit-mode', this.isEditMode);
