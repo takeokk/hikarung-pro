@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hikarung-pro-v2.8.0';
+const CACHE_NAME = 'hikarung-pro-v2.9.0';
 const ASSETS = [
   './',
   './index.html',
@@ -55,7 +55,7 @@ self.addEventListener('fetch', (event) => {
               });
             }
           })
-          .catch(() => {});
+          .catch(() => { });
         return cachedResponse;
       }
       return fetch(event.request).catch(() => caches.match('./index.html'));

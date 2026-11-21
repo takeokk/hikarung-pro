@@ -1440,3 +1440,121 @@ input, select, button {
     grid-template-columns: 1fr;
   }
 }
+
+
+/* ==================== STEREO VU METER PANEL ==================== */
+.vu-meter-panel {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 6px 12px;
+  background: #070b13;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.vu-meter-left {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  min-width: 82px;
+  gap: 2px;
+}
+
+.vu-led {
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(100, 116, 139, 0.2);
+  color: var(--text-muted);
+  border: 1px solid rgba(100, 116, 139, 0.35);
+}
+
+.vu-led.active {
+  background: rgba(16, 185, 129, 0.22);
+  color: #34d399;
+  border-color: #10b981;
+}
+
+.vu-led.clip {
+  background: rgba(244, 63, 94, 0.3);
+  color: #fb7185;
+  border-color: #f43f5e;
+}
+
+.vu-db {
+  font-size: 0.8rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-sub);
+}
+
+.vu-canvas-wrap {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+}
+
+#vuMeterCanvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border-radius: 6px;
+}
+
+/* ==================== WAVEFORM ZOOM & PAN BAR ==================== */
+.waveform-zoom-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.wf-zoom-btns {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.wf-zoom-readout {
+  font-size: 0.78rem;
+  font-weight: 800;
+  color: var(--accent-cyan);
+  min-width: 40px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-pan-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 180px;
+}
+
+.wf-pan-label {
+  font-size: 0.72rem;
+  color: var(--text-sub);
+  white-space: nowrap;
+}
+
+/* ==================== NON-BLOCKING DIALOG MODAL ==================== */
+.dialog-modal-card {
+  max-width: 440px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.bgm-options-row {
+  flex-wrap: wrap;
+}

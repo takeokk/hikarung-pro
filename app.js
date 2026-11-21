@@ -3,7 +3,7 @@
  * Zero external dependencies. Web Audio API + IndexedDB + Service Worker.
  */
 
-const APP_VERSION = 'v2.8.0';
+const APP_VERSION = 'v2.9.0';
 
 const PAD_COLORS = [
   { id: 'cyan', hex: '#06b6d4', label: 'シアン' },
@@ -14,6 +14,13 @@ const PAD_COLORS = [
   { id: 'blue', hex: '#3b82f6', label: 'ブルー' },
   { id: 'pink', hex: '#ec4899', label: 'ピンク' },
   { id: 'slate', hex: '#94a3b8', label: 'スレート' }
+];
+
+const KEYBOARD_ROWS = [
+  ['1', '2', '3', '4', '5', '6'],
+  ['Q', 'W', 'E', 'R', 'T', 'Y'],
+  ['A', 'S', 'D', 'F', 'G', 'H'],
+  ['Z', 'X', 'C', 'V', 'B', 'N']
 ];
 
 const DEFAULT_KEYS = [
@@ -145,6 +152,16 @@ class HikarungDB {
     });
   }
 
+  async getAudioFile(id) {
+    await this.init();
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction('audioFiles', 'readonly');
+      const req = tx.objectStore('audioFiles').get(id);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = (e) => reject(e.target.error);
+    });
+  }
+
   async getAllAudioFiles() {
     await this.init();
     return new Promise((resolve, reject) => {
@@ -203,12 +220,18 @@ class HikarungProApp {
     this.db = new HikarungDB();
     this.audioCtx = null;
     this.offlineDecodeCtx = null;
+    this.masterMixBus = null;
     this.masterSeGain = null;
     this.masterBgmGain = null;
+    this.analyserL = null;
+    this.analyserR = null;
+    this.analyserBufL = null;
+    this.analyserBufR = null;
 
     // Decoded AudioBuffer cache: Map<audioId, AudioBuffer>
     this.audioBuffers = new Map();
     this.audioMeta = new Map(); // Map<audioId, { name, duration }>
+    this.longBufferOrder = []; // LRU list of long (>=30s) AudioBuffers kept in RAM (max 3)
 
     // Active Pad Voices: Map<padId, Set<VoiceObj>>
     this.activePadVoices = new Map();
@@ -226,7 +249,9 @@ class HikarungProApp {
       playlists: [],
       bgmVol: 85,
       bgmMode: 'all_loop',
-      bgmXfade: 3.0
+      bgmXfade: 3.0,
+      bgmMonoLink: 'off',
+      slotKeys: {}
     };
 
     // Runtime UI state
@@ -237,6 +262,15 @@ class HikarungProApp {
     this.lastAnimTickMs = 0;
     this.bgKeepAliveAudio = null;
     this.bgKeepAliveStopTimer = null;
+
+    // VU Meter runtime state
+    this.vuState = {
+      peakL: -60,
+      peakR: -60,
+      holdL: -60,
+      holdR: -60,
+      isIdleDrawn: false
+    };
 
     // BGM Player Runtime
     this.bgmPlayer = {
@@ -257,6 +291,8 @@ class HikarungProApp {
     this.editorDraft = null;
     this.previewVoice = null;
     this.draggingTrimHandle = null;
+    this.editorZoom = 1;
+    this.editorPanStart = 0; // 0..1 fraction of total duration
   }
 
   async init() {
@@ -298,17 +334,53 @@ class HikarungProApp {
   }
 
   ensureAudioContext() {
+    // Request iOS/iPadOS 17+ Playback AudioSession (keeps Web Audio alive in background & ignores Silent Switch)
+    if ('audioSession' in navigator) {
+      try {
+        if (navigator.audioSession.type !== 'playback') {
+          navigator.audioSession.type = 'playback';
+        }
+      } catch (_) { }
+    }
+
     if (!this.audioCtx) {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
       this.audioCtx = new AudioContextClass({ latencyHint: 'interactive' });
 
+      // Master Mix Bus -> Output + Stereo L/R VU Meter Analysers
+      this.masterMixBus = this.audioCtx.createGain();
+      this.masterMixBus.gain.value = 1.0;
+      this.masterMixBus.connect(this.audioCtx.destination);
+
+      const splitter = this.audioCtx.createChannelSplitter(2);
+      this.analyserL = this.audioCtx.createAnalyser();
+      this.analyserR = this.audioCtx.createAnalyser();
+      this.analyserL.fftSize = 256;
+      this.analyserR.fftSize = 256;
+      this.analyserL.smoothingTimeConstant = 0.5;
+      this.analyserR.smoothingTimeConstant = 0.5;
+      this.analyserBufL = new Float32Array(this.analyserL.fftSize);
+      this.analyserBufR = new Float32Array(this.analyserR.fftSize);
+
+      this.masterMixBus.connect(splitter);
+      splitter.connect(this.analyserL, 0);
+      splitter.connect(this.analyserR, 1);
+
       this.masterSeGain = this.audioCtx.createGain();
       this.masterSeGain.gain.value = this.state.masterVol / 100;
-      this.masterSeGain.connect(this.audioCtx.destination);
+      this.masterSeGain.connect(this.masterMixBus);
 
       this.masterBgmGain = this.audioCtx.createGain();
       this.masterBgmGain.gain.value = this.getEffectiveBgmMasterGain();
-      this.masterBgmGain.connect(this.audioCtx.destination);
+      this.masterBgmGain.connect(this.masterMixBus);
+
+      // Auto-recover if iPadOS marks AudioContext as interrupted/suspended during playback
+      this.audioCtx.onstatechange = () => {
+        const anyPlaying = this.activePadVoices.size > 0 || this.bgmPlayer.isPlaying;
+        if (anyPlaying && this.audioCtx && (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted')) {
+          this.audioCtx.resume().catch(() => {});
+        }
+      };
 
       // Play a 1-sample silent buffer immediately to wake up iPadOS hardware audio with zero lag
       try {
@@ -321,14 +393,14 @@ class HikarungProApp {
 
       this.initBackgroundAudioKeepAlive();
     }
-    if (this.audioCtx.state === 'suspended') {
-      this.audioCtx.resume();
+    if (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted') {
+      this.audioCtx.resume().catch(() => {});
     }
     return this.audioCtx;
   }
 
   /**
-   * Creates an inaudible (-90dBFS) HTML5 <audio loop> bridge so iPadOS keeps
+   * Creates an inaudible (-90dBFS) DOM HTML5 <audio loop> bridge so iPadOS keeps
    * Web Audio API (AudioContext) and BGM playlist transitions running even when
    * switching to another app (background) or locking the screen.
    */
@@ -360,15 +432,18 @@ class HikarungProApp {
       }
 
       const b64 = this.arrayBufferToBase64(buf);
-      const audio = new Audio(`data:audio/wav;base64,${b64}`);
+      const audio = document.createElement('audio');
+      audio.src = `data:audio/wav;base64,${b64}`;
       audio.loop = true;
-      audio.volume = 0.01;
+      audio.volume = 1.0; // WAV itself is -90dBFS inaudible; full element volume prevents iOS muting
       audio.setAttribute('playsinline', 'true');
       audio.setAttribute('webkit-playsinline', 'true');
+      audio.style.display = 'none';
+      document.body.appendChild(audio);
 
       // Use HTML5 audio timeupdate in background to drive BGM crossfades & AudioContext resume
       audio.addEventListener('timeupdate', () => {
-        if (this.audioCtx && this.audioCtx.state === 'suspended') {
+        if (this.audioCtx && (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted')) {
           this.audioCtx.resume().catch(() => {});
         }
         if (document.hidden) {
@@ -548,18 +623,33 @@ class HikarungProApp {
     // Render UI immediately without waiting for audio decoding
     this.renderAll();
 
-    // Purge any legacy audio_demo_* files from IndexedDB and decode user files in parallel
-    const userFiles = [];
+    // Purge any legacy audio_demo_* files from IndexedDB and populate metadata immediately
+    const shortFilesToPreDecode = [];
     for (const fileRec of savedAudioFiles) {
       if (String(fileRec.id).startsWith('audio_demo_')) {
         await this.db.deleteAudioFile(fileRec.id);
       } else {
-        userFiles.push(fileRec);
+        this.audioMeta.set(fileRec.id, {
+          name: fileRec.name,
+          duration: Number(fileRec.duration) || 0
+        });
+        // Only pre-decode short SE files (<30s) into RAM at startup to prevent iPadOS OOM crashes.
+        // Long BGM tracks (>=30s) are lazy-decoded on demand and LRU-cached (max 3 in RAM).
+        if (!fileRec.duration || fileRec.duration < 30) {
+          shortFilesToPreDecode.push(fileRec);
+        }
       }
     }
 
-    if (userFiles.length > 0) {
-      await Promise.all(userFiles.map((rec) => this.decodeAndCacheAudioRecord(rec)));
+    // Re-render immediately so all track/pad durations from audioMeta appear right away
+    this.renderAll();
+
+    if (shortFilesToPreDecode.length > 0) {
+      // Decode short files in small batches (4 at a time) to avoid memory spikes on iPad
+      for (let i = 0; i < shortFilesToPreDecode.length; i += 4) {
+        const batch = shortFilesToPreDecode.slice(i, i + 4);
+        await Promise.all(batch.map((rec) => this.decodeAndCacheAudioRecord(rec)));
+      }
       this.renderAll();
     }
 
@@ -665,16 +755,66 @@ class HikarungProApp {
     }
   }
 
-  async decodeAndCacheAudioRecord(fileRec) {
+  isAudioIdCurrentlyProtected(audioId) {
+    if (this.bgmPlayer.activeNode && this.bgmPlayer.activeNode.track?.audioId === audioId) return true;
+    for (const fn of this.bgmPlayer.fadingNodes) {
+      if (fn.track?.audioId === audioId) return true;
+    }
+    if (this.editorDraft && this.editorDraft.audioId === audioId && !document.getElementById('editorModal').classList.contains('hidden')) {
+      return true;
+    }
+    for (const bank of this.state.banks) {
+      for (const pad of bank.pads) {
+        if (pad.audioId === audioId && this.activePadVoices.has(pad.id)) return true;
+      }
+    }
+    return false;
+  }
+
+  touchLongBufferLRU(audioId, duration) {
+    if (!duration || duration < 30) return;
+    this.longBufferOrder = this.longBufferOrder.filter((id) => id !== audioId);
+    this.longBufferOrder.push(audioId);
+  }
+
+  evictLongBuffersIfNeeded(keepIds = [], maxLongInRam = 3) {
+    const keepSet = new Set(keepIds);
+    while (this.longBufferOrder.length > maxLongInRam) {
+      const candidateIdx = this.longBufferOrder.findIndex(
+        (id) => !keepSet.has(id) && !this.isAudioIdCurrentlyProtected(id)
+      );
+      if (candidateIdx === -1) break;
+      const [evictId] = this.longBufferOrder.splice(candidateIdx, 1);
+      this.audioBuffers.delete(evictId);
+    }
+  }
+
+  async getOrDecodeAudioBuffer(audioId) {
+    if (!audioId) return null;
+    if (this.audioBuffers.has(audioId)) {
+      const existing = this.audioBuffers.get(audioId);
+      this.touchLongBufferLRU(audioId, existing.duration);
+      return existing;
+    }
+    const rec = await this.db.getAudioFile(audioId);
+    if (!rec) return null;
+    return await this.decodeAndCacheAudioRecord(rec, true);
+  }
+
+  async decodeAndCacheAudioRecord(fileRec, keepInRam = true) {
     try {
       const ctx = this.getDecodeContext();
       const bufferCopy = fileRec.arrayBuffer.slice(0);
       const audioBuffer = await ctx.decodeAudioData(bufferCopy);
-      this.audioBuffers.set(fileRec.id, audioBuffer);
       this.audioMeta.set(fileRec.id, {
         name: fileRec.name,
         duration: audioBuffer.duration
       });
+      if (keepInRam || audioBuffer.duration < 30) {
+        this.audioBuffers.set(fileRec.id, audioBuffer);
+        this.touchLongBufferLRU(fileRec.id, audioBuffer.duration);
+        this.evictLongBuffersIfNeeded([fileRec.id], 3);
+      }
       return audioBuffer;
     } catch (err) {
       console.warn('Audio decode warning:', err);
@@ -686,7 +826,7 @@ class HikarungProApp {
     await this.db.saveState(this.state);
   }
 
-  // ==================== GETTERS ====================
+  // ==================== GETTERS & POSITION-BASED KEYS ====================
   getCurrentBank() {
     return this.state.banks.find((b) => b.id === this.state.currentBankId) || this.state.banks[0];
   }
@@ -708,8 +848,31 @@ class HikarungProApp {
     return cols * rows;
   }
 
+  getDefaultKeyForSlot(slotIndex, gridSize = this.state.gridSize) {
+    const [cols] = gridSize.split('x').map(Number);
+    const row = Math.floor(slotIndex / cols);
+    const col = slotIndex % cols;
+    return (KEYBOARD_ROWS[row] && KEYBOARD_ROWS[row][col]) ? KEYBOARD_ROWS[row][col] : '';
+  }
+
+  getSlotKey(slotIndex) {
+    const g = this.state.gridSize;
+    const customMap = this.state.slotKeys && this.state.slotKeys[g];
+    if (customMap && Object.prototype.hasOwnProperty.call(customMap, slotIndex)) {
+      return customMap[slotIndex];
+    }
+    return this.getDefaultKeyForSlot(slotIndex, g);
+  }
+
+  setSlotKey(slotIndex, keyChar) {
+    const g = this.state.gridSize;
+    if (!this.state.slotKeys) this.state.slotKeys = {};
+    if (!this.state.slotKeys[g]) this.state.slotKeys[g] = {};
+    this.state.slotKeys[g][slotIndex] = String(keyChar || '').trim().toUpperCase();
+  }
+
   // ==================== SAMPLER PAD AUDIO ENGINE ====================
-  triggerPad(padIndex) {
+  async triggerPad(padIndex) {
     this.ensureAudioContext();
     const bank = this.getCurrentBank();
     if (!bank) return;
@@ -719,10 +882,13 @@ class HikarungProApp {
       return;
     }
 
-    const buffer = this.audioBuffers.get(pad.audioId);
+    let buffer = this.audioBuffers.get(pad.audioId);
     if (!buffer) {
-      this.showToast('音源データをデコード中です...');
-      return;
+      buffer = await this.getOrDecodeAudioBuffer(pad.audioId);
+      if (!buffer) {
+        this.showToast('音源データを読み込めませんでした');
+        return;
+      }
     }
 
     const mode = pad.triggerMode || 'poly';
@@ -736,6 +902,14 @@ class HikarungProApp {
         return;
       }
       this.stopPadsByMode('mono', 0.05);
+      // MONO連動: If BGM Playlist is linked to MONO group, stop/fade BGM deck
+      if (this.bgmPlayer.isPlaying && this.state.bgmMonoLink && this.state.bgmMonoLink !== 'off') {
+        if (this.state.bgmMonoLink === 'fade') {
+          this.fadeStopBgm(Number(this.state.bgmXfade) || 2.0);
+        } else {
+          this.stopBgmImmediately();
+        }
+      }
     } else if (mode === 'xfade') {
       const existing = this.activePadVoices.get(pad.id);
       if (existing && existing.size > 0) {
@@ -889,7 +1063,13 @@ class HikarungProApp {
   }
 
   // ==================== BGM PLAYLIST DECK ENGINE ====================
-  playBgmTrack(index, crossfadeSec = 0, targetPlaylistId = null) {
+  applyBgmMonoLinkStopPads() {
+    if (!this.state.bgmMonoLink || this.state.bgmMonoLink === 'off') return;
+    const fadeSec = this.state.bgmMonoLink === 'fade' ? (Number(this.state.bgmXfade) || 2.0) : 0.05;
+    this.stopPadsByMode('mono', fadeSec);
+  }
+
+  async playBgmTrack(index, crossfadeSec = 0, targetPlaylistId = null) {
     this.ensureAudioContext();
     if (targetPlaylistId) {
       this.bgmPlayer.playingPlaylistId = targetPlaylistId;
@@ -905,7 +1085,7 @@ class HikarungProApp {
 
     const safeIndex = ((index % pl.tracks.length) + pl.tracks.length) % pl.tracks.length;
     const track = pl.tracks[safeIndex];
-    const buffer = this.audioBuffers.get(track.audioId);
+    const buffer = await this.getOrDecodeAudioBuffer(track.audioId);
     if (!buffer) {
       this.showToast('BGM音源データを読み込めませんでした');
       return;
@@ -914,6 +1094,9 @@ class HikarungProApp {
     if (this.bgmPlayer.activeNode) {
       this.retireActiveBgmNode(crossfadeSec);
     }
+
+    // MONO連動: stop/fade any active MONO pads when BGM starts
+    this.applyBgmMonoLinkStopPads();
 
     this.bgmPlayer.playingPlaylistId = pl.id;
     this.bgmPlayer.currentTrackIndex = safeIndex;
@@ -1012,7 +1195,7 @@ class HikarungProApp {
     } catch (_) { }
   }
 
-  toggleBgmPlayPause() {
+  async toggleBgmPlayPause() {
     this.ensureAudioContext();
 
     if (this.bgmPlayer.isPlaying && this.bgmPlayer.activeNode) {
@@ -1040,8 +1223,9 @@ class HikarungProApp {
 
     const idx = Math.min(this.bgmPlayer.currentTrackIndex, pl.tracks.length - 1);
     const track = pl.tracks[idx];
-    const buffer = this.audioBuffers.get(track.audioId);
+    const buffer = await this.getOrDecodeAudioBuffer(track.audioId);
     if (!buffer) return;
+    this.applyBgmMonoLinkStopPads();
     this.bgmPlayer.playingPlaylistId = pl.id;
     this.bgmPlayer.currentTrackIndex = idx;
     this.startBgmNodeFromOffset(track, buffer, this.bgmPlayer.pausedAtOffset || 0, 0.05);
@@ -1125,17 +1309,19 @@ class HikarungProApp {
 
   getBgmTrackTiming(track, ratio = null) {
     if (!track || !track.audioId) return null;
-    const buffer = this.audioBuffers.get(track.audioId);
-    if (!buffer) return null;
+    const buffer = this.audioBuffers.get(track.audioId) || null;
+    const meta = this.audioMeta.get(track.audioId);
+    const totalDuration = buffer ? buffer.duration : (meta ? Number(meta.duration) : 0);
+    if (!totalDuration || totalDuration <= 0) return null;
 
     const speed = Math.max(0.25, Math.min(3.0, Number(track.speed) || 1.0));
     const pitchSemi = Number(track.pitch) || 0;
     const effectiveRate = speed * Math.pow(2, pitchSemi / 12);
 
-    const trimStart = Math.max(0, Math.min(buffer.duration - 0.02, Number(track.trimStart) || 0));
-    const trimEnd = (Number(track.trimEnd) > trimStart && Number(track.trimEnd) <= buffer.duration)
+    const trimStart = Math.max(0, Math.min(totalDuration - 0.02, Number(track.trimStart) || 0));
+    const trimEnd = (Number(track.trimEnd) > trimStart && Number(track.trimEnd) <= totalDuration)
       ? Number(track.trimEnd)
-      : buffer.duration;
+      : totalDuration;
     const regionDur = Math.max(0.05, trimEnd - trimStart);
     const clampedRatio = ratio !== null
       ? Math.max(0, Math.min(1, ratio))
@@ -1163,7 +1349,7 @@ class HikarungProApp {
     }
   }
 
-  seekBgmToRatio(ratio) {
+  async seekBgmToRatio(ratio) {
     const pl = this.getPlayingPlaylist();
     if (!pl || pl.tracks.length === 0) return;
     const track = pl.tracks[this.bgmPlayer.currentTrackIndex];
@@ -1177,8 +1363,10 @@ class HikarungProApp {
     }
 
     if (this.bgmPlayer.isPlaying) {
+      const buf = info.buffer || await this.getOrDecodeAudioBuffer(track.audioId);
+      if (!buf) return;
       this.retireActiveBgmNode(0.025);
-      this.startBgmNodeFromOffset(track, info.buffer, info.targetOffset, 0.025);
+      this.startBgmNodeFromOffset(track, buf, info.targetOffset, 0.025);
     }
   }
 
@@ -1218,11 +1406,14 @@ class HikarungProApp {
     // COMPLETE IDLE SLEEP: 0% CPU/GPU usage when no sound is playing
     if (!hasPads && !hasBgm && !hasPreview) {
       this.scheduleStopBackgroundKeepAliveIfIdle();
+      if (!this.vuState.isIdleDrawn) {
+        this.drawVuMeter(false);
+      }
       return;
     }
 
-    // Throttle interval: 60ms (~16fps) when SE pads/preview are active, 250ms (4fps) when ONLY BGM is playing
-    const minIntervalMs = (hasPads || hasPreview) ? 60 : 250;
+    // Throttle interval: 55ms (~18fps) when foregrounded (smooth VU meter + pad countdown), 250ms when backgrounded
+    const minIntervalMs = document.hidden ? 250 : 55;
 
     if (this.audioCtx && (nowMs - this.lastAnimTickMs >= minIntervalMs)) {
       this.lastAnimTickMs = nowMs;
@@ -1307,23 +1498,149 @@ class HikarungProApp {
         }
       }
 
-      // 3. Editor Preview playhead
+      // 3. Draw Master Stereo Output VU Meter (only when foregrounded)
+      if (!document.hidden) {
+        this.drawVuMeter(true);
+      }
+
+      // 4. Editor Preview playhead
       if (hasPreview && !document.hidden) {
         this.drawEditorWaveform();
       }
     }
 
-    // Schedule next tick: use low-power 250ms timer when only BGM is playing (or screen hidden), rAF only when SE pads are active
-    if (document.hidden || (!hasPads && !hasPreview && hasBgm)) {
+    // Schedule next tick: 250ms timer when backgrounded, lightweight 55ms timer when foregrounded (saves battery vs 120Hz rAF)
+    if (document.hidden) {
       this.bgTimerId = setTimeout(() => {
         this.bgTimerId = null;
         this.runAnimationTick(performance.now());
       }, 250);
     } else {
-      this.animFrameId = requestAnimationFrame((nextMs) => {
-        this.animFrameId = null;
-        this.runAnimationTick(nextMs);
-      });
+      this.bgTimerId = setTimeout(() => {
+        this.bgTimerId = null;
+        this.runAnimationTick(performance.now());
+      }, 55);
+    }
+  }
+
+  drawVuMeter(isActive) {
+    const canvas = document.getElementById('vuMeterCanvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width;
+    const h = canvas.height;
+
+    let dbL = -60;
+    let dbR = -60;
+
+    if (isActive && this.analyserL && this.analyserR && this.analyserBufL && this.analyserBufR) {
+      this.analyserL.getFloatTimeDomainData(this.analyserBufL);
+      this.analyserR.getFloatTimeDomainData(this.analyserBufR);
+      let maxL = 0;
+      let maxR = 0;
+      for (let i = 0; i < this.analyserBufL.length; i++) {
+        const aL = Math.abs(this.analyserBufL[i]);
+        const aR = Math.abs(this.analyserBufR[i]);
+        if (aL > maxL) maxL = aL;
+        if (aR > maxR) maxR = aR;
+      }
+      dbL = maxL > 0.0005 ? Math.max(-60, Math.min(3, 20 * Math.log10(maxL))) : -60;
+      dbR = maxR > 0.0005 ? Math.max(-60, Math.min(3, 20 * Math.log10(maxR))) : -60;
+
+      // Smooth falloff + peak hold
+      this.vuState.peakL = dbL > this.vuState.peakL ? dbL : Math.max(-60, this.vuState.peakL - 3.2);
+      this.vuState.peakR = dbR > this.vuState.peakR ? dbR : Math.max(-60, this.vuState.peakR - 3.2);
+      this.vuState.holdL = dbL > this.vuState.holdL ? dbL : Math.max(-60, this.vuState.holdL - 0.9);
+      this.vuState.holdR = dbR > this.vuState.holdR ? dbR : Math.max(-60, this.vuState.holdR - 0.9);
+      this.vuState.isIdleDrawn = false;
+    } else {
+      this.vuState.peakL = -60;
+      this.vuState.peakR = -60;
+      this.vuState.holdL = -60;
+      this.vuState.holdR = -60;
+      this.vuState.isIdleDrawn = true;
+    }
+
+    // Clear background
+    ctx.fillStyle = '#050810';
+    ctx.fillRect(0, 0, w, h);
+
+    const labelW = 18;
+    const barW = w - labelW - 6;
+    const segments = 48;
+    const segGap = 2;
+    const segW = (barW - (segments - 1) * segGap) / segments;
+    const minDb = -48;
+    const maxDb = 0;
+
+    const drawChannel = (label, y, barH, dbVal, holdDb) => {
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = 'bold 11px sans-serif';
+      ctx.fillText(label, 3, y + barH - 2);
+
+      const norm = Math.max(0, Math.min(1, (dbVal - minDb) / (maxDb - minDb)));
+      const litSegs = Math.round(norm * segments);
+      const holdNorm = Math.max(0, Math.min(1, (holdDb - minDb) / (maxDb - minDb)));
+      const holdSeg = Math.round(holdNorm * segments) - 1;
+
+      for (let s = 0; s < segments; s++) {
+        const ratio = s / (segments - 1);
+        const sx = labelW + s * (segW + segGap);
+        let onColor = '#10b981'; // Green (-48 to -12dB)
+        let offColor = 'rgba(16, 185, 129, 0.12)';
+        if (ratio >= 0.90) {
+          onColor = '#f43f5e'; // Red (-3 to 0dB CLIP)
+          offColor = 'rgba(244, 63, 94, 0.14)';
+        } else if (ratio >= 0.72) {
+          onColor = '#f59e0b'; // Amber (-12 to -3dB)
+          offColor = 'rgba(245, 158, 11, 0.14)';
+        }
+
+        if (s < litSegs) {
+          ctx.fillStyle = onColor;
+        } else if (isActive && s === holdSeg && holdDb > minDb + 1) {
+          ctx.fillStyle = '#ffffff';
+        } else {
+          ctx.fillStyle = offColor;
+        }
+        ctx.fillRect(sx, y, segW, barH);
+      }
+    };
+
+    drawChannel('L', 4, 12, this.vuState.peakL, this.vuState.holdL);
+    drawChannel('R', 20, 12, this.vuState.peakR, this.vuState.holdR);
+
+    // dB scale ticks at bottom
+    ctx.fillStyle = '#64748b';
+    ctx.font = '9px sans-serif';
+    const marks = [-48, -36, -24, -12, -6, -3, 0];
+    for (const m of marks) {
+      const r = (m - minDb) / (maxDb - minDb);
+      const mx = labelW + r * barW;
+      ctx.fillText(m === 0 ? '0dB' : String(m), Math.min(w - 22, Math.max(labelW, mx - 8)), h - 1);
+    }
+
+    // Update numeric readout & ON AIR LED
+    const peakMax = Math.max(this.vuState.peakL, this.vuState.peakR);
+    const dbEl = document.getElementById('vuDbReadout');
+    const ledEl = document.getElementById('vuOnAirLed');
+    if (dbEl) {
+      const txt = (isActive && peakMax > -59) ? `${peakMax.toFixed(1)} dB` : '-∞ dB';
+      if (dbEl._lastT !== txt) {
+        dbEl._lastT = txt;
+        dbEl.textContent = txt;
+      }
+    }
+    if (ledEl) {
+      const isClipping = isActive && peakMax >= -1.5;
+      const isSignal = isActive && peakMax > -52;
+      ledEl.classList.toggle('active', isSignal && !isClipping);
+      ledEl.classList.toggle('clip', isClipping);
+      const ledTxt = isClipping ? 'CLIP!' : (isSignal ? 'OUTPUT ●' : 'OUTPUT');
+      if (ledEl._lastT !== ledTxt) {
+        ledEl._lastT = ledTxt;
+        ledEl.textContent = ledTxt;
+      }
     }
   }
 
@@ -1335,6 +1652,9 @@ class HikarungProApp {
     this.renderPlaylistSelector();
     this.renderBgmTrackList();
     this.updateBgmTransportUI();
+    if (this.activePadVoices.size === 0 && !this.bgmPlayer.isPlaying) {
+      this.drawVuMeter(false);
+    }
   }
 
   renderTopBarState() {
@@ -1356,6 +1676,8 @@ class HikarungProApp {
     document.getElementById('labelBgmVol').textContent = `${this.state.bgmVol}%`;
     document.getElementById('selectBgmMode').value = this.state.bgmMode;
     document.getElementById('selectBgmXfade').value = String(this.state.bgmXfade);
+    const monoSel = document.getElementById('selectBgmMonoLink');
+    if (monoSel) monoSel.value = this.state.bgmMonoLink || 'off';
   }
 
   renderBankTabs() {
@@ -1392,9 +1714,10 @@ class HikarungProApp {
 
     for (let i = 0; i < count; i++) {
       const pad = bank.pads[i];
-      const hasAudio = Boolean(pad.audioId && this.audioBuffers.has(pad.audioId));
+      const hasAudio = Boolean(pad.audioId && (this.audioBuffers.has(pad.audioId) || this.audioMeta.has(pad.audioId)));
       const voices = this.activePadVoices.get(pad.id);
       const isPlaying = Boolean(voices && voices.size > 0);
+      const slotKey = this.getSlotKey(i);
 
       const padEl = document.createElement('div');
       padEl.className = `sound-pad ${hasAudio ? 'loaded-pad' : 'empty-pad'} ${isPlaying ? 'playing' : ''}`;
@@ -1411,7 +1734,7 @@ class HikarungProApp {
             <span class="pad-num-badge">#${i + 1}</span>
             ${hasAudio ? `<span class="pad-mode-badge">${MODE_LABELS[pad.triggerMode] || 'POLY'}</span>` : ''}
             ${hasAudio && pad.loop ? `<span class="pad-loop-badge">🔁 LOOP</span>` : ''}
-            ${pad.key ? `<span class="pad-key-badge">${this.escapeHtml(pad.key)}</span>` : ''}
+            ${slotKey ? `<span class="pad-key-badge">${this.escapeHtml(slotKey)}</span>` : ''}
           </div>
           <button type="button" class="pad-gear-btn" title="波形編集・設定を開く">⚙️</button>
         </div>
@@ -1612,11 +1935,13 @@ class HikarungProApp {
   getPadTrimmedDuration(item) {
     if (!item || !item.audioId) return 0;
     const buf = this.audioBuffers.get(item.audioId);
-    if (!buf) return 0;
+    const meta = this.audioMeta.get(item.audioId);
+    const totalDur = buf ? buf.duration : (meta ? Number(meta.duration) : 0);
+    if (!totalDur || totalDur <= 0) return 0;
     const start = Math.max(0, Number(item.trimStart) || 0);
-    const end = (Number(item.trimEnd) > start && Number(item.trimEnd) <= buf.duration)
+    const end = (Number(item.trimEnd) > start && Number(item.trimEnd) <= totalDur)
       ? Number(item.trimEnd)
-      : buf.duration;
+      : totalDur;
     const speed = Math.max(0.25, Number(item.speed) || 1.0);
     const pitch = Number(item.pitch) || 0;
     const rate = speed * Math.pow(2, pitch / 12);
@@ -1777,7 +2102,7 @@ class HikarungProApp {
   }
 
   // ==================== WAVEFORM & AUDIO EDITOR MODAL ====================
-  openEditorForPad(padIndex) {
+  async openEditorForPad(padIndex) {
     const bank = this.getCurrentBank();
     if (!bank) return;
     const pad = bank.pads[padIndex];
@@ -1785,6 +2110,9 @@ class HikarungProApp {
 
     this.editorTarget = { type: 'pad', bankId: bank.id, padIndex };
     this.editorDraft = JSON.parse(JSON.stringify(pad));
+    this.editorDraft.key = this.getSlotKey(padIndex);
+    this.editorZoom = 1;
+    this.editorPanStart = 0;
 
     document.getElementById('editorTargetBadge').textContent = `PAD #${padIndex + 1}`;
     document.getElementById('editorModalTitle').textContent = 'パッド設定・波形簡易編集';
@@ -1794,12 +2122,17 @@ class HikarungProApp {
     document.getElementById('padOnlyColorRow').style.display = '';
     document.getElementById('btnClearTarget').style.display = '';
 
+    if (this.editorDraft.audioId && !this.audioBuffers.has(this.editorDraft.audioId)) {
+      await this.getOrDecodeAudioBuffer(this.editorDraft.audioId);
+    }
+
     this.populateEditorModalFields();
+    this.updateWaveformZoomUI();
     document.getElementById('editorModal').classList.remove('hidden');
     this.drawEditorWaveform();
   }
 
-  openEditorForBgmTrack(trackIndex) {
+  async openEditorForBgmTrack(trackIndex) {
     const pl = this.getCurrentPlaylist();
     if (!pl) return;
     const track = pl.tracks[trackIndex];
@@ -1807,6 +2140,8 @@ class HikarungProApp {
 
     this.editorTarget = { type: 'bgm', playlistId: pl.id, trackIndex };
     this.editorDraft = JSON.parse(JSON.stringify(track));
+    this.editorZoom = 1;
+    this.editorPanStart = 0;
 
     document.getElementById('editorTargetBadge').textContent = `BGM #${trackIndex + 1}`;
     document.getElementById('editorModalTitle').textContent = 'BGMトラック波形・音量・フェード編集';
@@ -1816,7 +2151,12 @@ class HikarungProApp {
     document.getElementById('padOnlyColorRow').style.display = 'none';
     document.getElementById('btnClearTarget').style.display = 'none';
 
+    if (this.editorDraft.audioId && !this.audioBuffers.has(this.editorDraft.audioId)) {
+      await this.getOrDecodeAudioBuffer(this.editorDraft.audioId);
+    }
+
     this.populateEditorModalFields();
+    this.updateWaveformZoomUI();
     document.getElementById('editorModal').classList.remove('hidden');
     this.drawEditorWaveform();
   }
@@ -1892,6 +2232,55 @@ class HikarungProApp {
     document.getElementById('labelEditPitch').textContent = `${pitch > 0 ? '+' : ''}${pitch} 半音`;
   }
 
+  getWaveformViewWindow(dur) {
+    const zoom = Math.max(1, Math.min(32, Number(this.editorZoom) || 1));
+    const spanFrac = 1 / zoom;
+    const maxPan = Math.max(0, 1 - spanFrac);
+    const startFrac = Math.max(0, Math.min(maxPan, Number(this.editorPanStart) || 0));
+    const endFrac = Math.min(1, startFrac + spanFrac);
+    return {
+      zoom,
+      startFrac,
+      endFrac,
+      viewStart: startFrac * dur,
+      viewEnd: endFrac * dur,
+      viewDur: Math.max(0.01, (endFrac - startFrac) * dur)
+    };
+  }
+
+  updateWaveformZoomUI() {
+    const zoom = Math.max(1, Math.min(32, Number(this.editorZoom) || 1));
+    const maxPan = Math.max(0, 1 - 1 / zoom);
+    this.editorPanStart = Math.max(0, Math.min(maxPan, this.editorPanStart || 0));
+
+    const label = document.getElementById('labelZoomLevel');
+    const panSlider = document.getElementById('sliderWaveformPan');
+    if (label) label.textContent = `${zoom.toFixed(1)}x`;
+    if (panSlider) {
+      panSlider.disabled = zoom <= 1.01;
+      panSlider.value = maxPan > 0 ? String(Math.round((this.editorPanStart / maxPan) * 1000)) : '0';
+    }
+  }
+
+  setEditorZoom(newZoom, focusFrac = null) {
+    const clampedZoom = Math.max(1, Math.min(32, newZoom));
+    const oldSpan = 1 / (this.editorZoom || 1);
+    const centerFrac = focusFrac !== null ? focusFrac : (this.editorPanStart + oldSpan / 2);
+    const newSpan = 1 / clampedZoom;
+    this.editorZoom = clampedZoom;
+    this.editorPanStart = Math.max(0, Math.min(1 - newSpan, centerFrac - newSpan / 2));
+    this.updateWaveformZoomUI();
+    this.drawEditorWaveform();
+  }
+
+  focusEditorZoomOnTime(timeSec) {
+    const d = this.editorDraft;
+    const buf = d && d.audioId ? this.audioBuffers.get(d.audioId) : null;
+    if (!buf || buf.duration <= 0) return;
+    const targetZoom = this.editorZoom < 4 ? 8 : this.editorZoom;
+    this.setEditorZoom(targetZoom, Math.max(0, Math.min(1, timeSec / buf.duration)));
+  }
+
   drawEditorWaveform() {
     const canvas = document.getElementById('waveformCanvas');
     if (!canvas || !this.editorDraft) return;
@@ -1914,18 +2303,30 @@ class HikarungProApp {
 
     const data = buf.getChannelData(0);
     const dur = buf.duration;
-    const startRatio = Math.max(0, Math.min(1, (Number(d.trimStart) || 0) / dur));
-    const endRatio = Math.max(startRatio, Math.min(1, (Number(d.trimEnd) || dur) / dur));
-    const startX = startRatio * w;
-    const endX = endRatio * w;
+    const { startFrac, endFrac, viewStart, viewEnd, viewDur } = this.getWaveformViewWindow(dur);
+
+    const timeToX = (t) => ((t - viewStart) / viewDur) * w;
+    const trimStart = Math.max(0, Math.min(dur, Number(d.trimStart) || 0));
+    const trimEnd = Math.max(trimStart, Math.min(dur, Number(d.trimEnd) || dur));
+    const startX = timeToX(trimStart);
+    const endX = timeToX(trimEnd);
     const gainScale = (Number(d.gain ?? 100) / 100);
 
-    ctx.fillStyle = 'rgba(6, 182, 212, 0.1)';
-    ctx.fillRect(startX, 0, Math.max(2, endX - startX), h);
+    // Highlight active trimmed zone within viewport
+    const visStartX = Math.max(0, Math.min(w, startX));
+    const visEndX = Math.max(0, Math.min(w, endX));
+    if (visEndX > visStartX) {
+      ctx.fillStyle = 'rgba(6, 182, 212, 0.1)';
+      ctx.fillRect(visStartX, 0, visEndX - visStartX, h);
+    }
 
-    const step = Math.max(1, Math.floor(data.length / w));
+    const viewSampleStart = Math.floor(startFrac * data.length);
+    const viewSampleEnd = Math.min(data.length, Math.ceil(endFrac * data.length));
+    const viewSamples = Math.max(1, viewSampleEnd - viewSampleStart);
+    const step = Math.max(1, Math.floor(viewSamples / w));
+
     for (let x = 0; x < w; x++) {
-      const sampleIdx = Math.floor((x / w) * data.length);
+      const sampleIdx = viewSampleStart + Math.floor((x / w) * viewSamples);
       let min = 1.0;
       let max = -1.0;
       for (let j = 0; j < step && sampleIdx + j < data.length; j++) {
@@ -1942,46 +2343,64 @@ class HikarungProApp {
       ctx.fillRect(x, y1, 1, Math.max(1, y2 - y1));
     }
 
+    // Dim trimmed-out areas
     ctx.fillStyle = 'rgba(3, 7, 18, 0.65)';
-    if (startX > 0) ctx.fillRect(0, 0, startX, h);
-    if (endX < w) ctx.fillRect(endX, 0, w - endX, h);
+    if (visStartX > 0) ctx.fillRect(0, 0, visStartX, h);
+    if (visEndX < w) ctx.fillRect(visEndX, 0, w - visEndX, h);
 
+    // Fade-in & Fade-out envelope
     const fadeInSec = Number(d.fadeIn) || 0;
     const fadeOutSec = Number(d.fadeOut) || 0;
-    const fadeInW = Math.min(endX - startX, (fadeInSec / dur) * w);
-    const fadeOutW = Math.min(endX - startX, (fadeOutSec / dur) * w);
+    const fadeInEndX = timeToX(Math.min(trimEnd, trimStart + fadeInSec));
+    const fadeOutStartX = timeToX(Math.max(trimStart, trimEnd - fadeOutSec));
 
     ctx.strokeStyle = '#fbbf24';
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(startX, h - 6);
-    ctx.lineTo(startX + fadeInW, 10);
-    ctx.lineTo(endX - fadeOutW, 10);
+    ctx.lineTo(fadeInEndX, 10);
+    ctx.lineTo(fadeOutStartX, 10);
     ctx.lineTo(endX, h - 6);
     ctx.stroke();
 
-    ctx.fillStyle = '#10b981';
-    ctx.fillRect(startX - 2, 0, 4, h);
-    ctx.beginPath();
-    ctx.roundRect(startX, 4, 48, 20, 4);
-    ctx.fill();
-    ctx.fillStyle = '#052e16';
-    ctx.font = 'bold 11px sans-serif';
-    ctx.fillText('IN ▶', startX + 6, 18);
+    // Start handle (if visible)
+    if (startX >= -4 && startX <= w + 4) {
+      ctx.fillStyle = '#10b981';
+      ctx.fillRect(startX - 2, 0, 4, h);
+      ctx.beginPath();
+      ctx.roundRect(Math.min(w - 50, Math.max(2, startX)), 4, 48, 20, 4);
+      ctx.fill();
+      ctx.fillStyle = '#052e16';
+      ctx.font = 'bold 11px sans-serif';
+      ctx.fillText('IN ▶', Math.min(w - 44, Math.max(8, startX + 6)), 18);
+    }
 
-    ctx.fillStyle = '#f59e0b';
-    ctx.fillRect(endX - 2, 0, 4, h);
-    ctx.beginPath();
-    ctx.roundRect(endX - 48, h - 24, 48, 20, 4);
-    ctx.fill();
-    ctx.fillStyle = '#451a03';
-    ctx.fillText('◀ OUT', endX - 42, h - 10);
+    // End handle (if visible)
+    if (endX >= -4 && endX <= w + 4) {
+      ctx.fillStyle = '#f59e0b';
+      ctx.fillRect(endX - 2, 0, 4, h);
+      ctx.beginPath();
+      ctx.roundRect(Math.max(2, Math.min(w - 50, endX - 48)), h - 24, 48, 20, 4);
+      ctx.fill();
+      ctx.fillStyle = '#451a03';
+      ctx.fillText('◀ OUT', Math.max(8, Math.min(w - 44, endX - 42)), h - 10);
+    }
 
+    // Viewport time range indicator when zoomed in
+    if (this.editorZoom > 1) {
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.85)';
+      ctx.font = 'bold 10px sans-serif';
+      ctx.fillText(`${viewStart.toFixed(2)}s`, 6, h - 6);
+      const endLabel = `${viewEnd.toFixed(2)}s`;
+      ctx.fillText(endLabel, w - ctx.measureText(endLabel).width - 6, 14);
+    }
+
+    // Preview playhead
     if (this.previewVoice && this.audioCtx) {
       const elapsedWall = this.audioCtx.currentTime - this.previewVoice.startedAt;
       const curBufTime = this.previewVoice.trimStart + elapsedWall * this.previewVoice.effectiveRate;
-      if (curBufTime <= this.previewVoice.trimEnd) {
-        const px = (curBufTime / dur) * w;
+      if (curBufTime >= viewStart && curBufTime <= viewEnd && curBufTime <= this.previewVoice.trimEnd) {
+        const px = timeToX(curBufTime);
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(px - 1, 0, 2.5, h);
       }
@@ -2127,9 +2546,10 @@ class HikarungProApp {
     this.editorDraft.name = document.getElementById('inputEditName').value.trim() || '無題';
     this.editorDraft.triggerMode = document.getElementById('selectEditTriggerMode').value;
     this.editorDraft.loop = document.getElementById('checkEditLoop').checked;
-    this.editorDraft.key = document.getElementById('inputEditKey').value.trim().toUpperCase();
+    const editedKey = document.getElementById('inputEditKey').value.trim().toUpperCase();
 
     if (this.editorTarget.type === 'pad') {
+      this.setSlotKey(this.editorTarget.padIndex, editedKey);
       const bank = this.state.banks.find((b) => b.id === this.editorTarget.bankId);
       if (bank && bank.pads[this.editorTarget.padIndex]) {
         bank.pads[this.editorTarget.padIndex] = JSON.parse(JSON.stringify(this.editorDraft));
@@ -2148,7 +2568,7 @@ class HikarungProApp {
   }
 
   // ==================== FILE IMPORT & BACKUP ====================
-  async importAudioFileToRecord(file) {
+  async importAudioFileToRecord(file, keepInRam = true) {
     const arrayBuffer = await file.arrayBuffer();
     const audioId = `aud_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const cleanName = file.name.replace(/\.[^/.]+$/, '');
@@ -2159,12 +2579,17 @@ class HikarungProApp {
       arrayBuffer,
       duration: 0
     };
-    const decoded = await this.decodeAndCacheAudioRecord(record);
+    const decoded = await this.decodeAndCacheAudioRecord(record, keepInRam);
     if (!decoded) {
       throw new Error(`「${file.name}」のデコードに失敗しました`);
     }
     record.duration = decoded.duration;
     await this.db.saveAudioFile(record);
+    // For batch imports of long BGM files, evict immediately to avoid iPadOS OOM crash
+    if (!keepInRam && decoded.duration >= 30) {
+      this.audioBuffers.delete(audioId);
+      this.longBufferOrder = this.longBufferOrder.filter((id) => id !== audioId);
+    }
     return { audioId, name: cleanName, duration: decoded.duration };
   }
 
@@ -2301,8 +2726,8 @@ class HikarungProApp {
       e.currentTarget.classList.toggle('active', !collapsed);
     });
 
-    document.getElementById('btnAddBank').addEventListener('click', () => {
-      const name = prompt('新しい進行バンク（セットリスト）の名前を入力してください:', `${this.state.banks.length + 1}. 新規コーナー`);
+    document.getElementById('btnAddBank').addEventListener('click', async () => {
+      const name = await this.showPromptDialog('バンク追加', '新しい進行バンク（セットリスト）の名前を入力してください:', `${this.state.banks.length + 1}. 新規コーナー`);
       if (!name) return;
       const newBank = this.createDefaultBank(`bank_${Date.now()}`, name.trim());
       this.state.banks.push(newBank);
@@ -2312,23 +2737,24 @@ class HikarungProApp {
       this.renderPadGrid();
     });
 
-    document.getElementById('btnRenameBank').addEventListener('click', () => {
+    document.getElementById('btnRenameBank').addEventListener('click', async () => {
       const bank = this.getCurrentBank();
       if (!bank) return;
-      const name = prompt('バンク名を変更:', bank.name);
+      const name = await this.showPromptDialog('バンク名変更', '新しいバンク名を入力してください:', bank.name);
       if (!name) return;
       bank.name = name.trim();
       this.saveAppState();
       this.renderBankTabs();
     });
 
-    document.getElementById('btnDeleteBank').addEventListener('click', () => {
+    document.getElementById('btnDeleteBank').addEventListener('click', async () => {
       if (this.state.banks.length <= 1) {
         this.showToast('最低1つのバンクが必要です');
         return;
       }
       const bank = this.getCurrentBank();
-      if (!confirm(`バンク「${bank.name}」を削除しますか？`)) return;
+      const ok = await this.showConfirmDialog('バンク削除', `バンク「${bank.name}」を削除しますか？`);
+      if (!ok) return;
       this.state.banks = this.state.banks.filter((b) => b.id !== bank.id);
       this.state.currentBankId = this.state.banks[0].id;
       this.saveAppState();
@@ -2345,11 +2771,14 @@ class HikarungProApp {
       const bank = this.getCurrentBank();
       let importedCount = 0;
       let xfadeAutoCount = 0;
-      for (const file of files) {
+      const isBulk = files.length >= 3;
+      for (let fIdx = 0; fIdx < files.length; fIdx++) {
+        const file = files[fIdx];
         const emptyPad = bank.pads.find((p) => !p.audioId);
         if (!emptyPad) break;
         try {
-          const info = await this.importAudioFileToRecord(file);
+          if (isBulk) this.showToast(`読み込み中... (${fIdx + 1}/${files.length})`);
+          const info = await this.importAudioFileToRecord(file, !isBulk);
           emptyPad.name = info.name;
           emptyPad.audioId = info.audioId;
           emptyPad.trimStart = 0;
@@ -2382,8 +2811,8 @@ class HikarungProApp {
       this.updateBgmTransportUI();
     });
 
-    document.getElementById('btnAddPlaylist').addEventListener('click', () => {
-      const name = prompt('新しいBGMプレイリストの名前:', '新規BGMプレイリスト');
+    document.getElementById('btnAddPlaylist').addEventListener('click', async () => {
+      const name = await this.showPromptDialog('プレイリスト追加', '新しいBGMプレイリストの名前を入力してください:', '新規BGMプレイリスト');
       if (!name) return;
       const pl = { id: `pl_${Date.now()}`, name: name.trim(), tracks: [] };
       this.state.playlists.push(pl);
@@ -2399,10 +2828,10 @@ class HikarungProApp {
       this.updateBgmTransportUI();
     });
 
-    document.getElementById('btnRenamePlaylist').addEventListener('click', () => {
+    document.getElementById('btnRenamePlaylist').addEventListener('click', async () => {
       const pl = this.getCurrentPlaylist();
       if (!pl) return;
-      const name = prompt('プレイリスト名を変更:', pl.name);
+      const name = await this.showPromptDialog('プレイリスト名変更', '新しいプレイリスト名を入力してください:', pl.name);
       if (!name) return;
       pl.name = name.trim();
       this.saveAppState();
@@ -2410,13 +2839,14 @@ class HikarungProApp {
       this.updateBgmTransportUI();
     });
 
-    document.getElementById('btnDeletePlaylist').addEventListener('click', () => {
+    document.getElementById('btnDeletePlaylist').addEventListener('click', async () => {
       if (this.state.playlists.length <= 1) {
         this.showToast('最低1つのプレイリストが必要です');
         return;
       }
       const pl = this.getCurrentPlaylist();
-      if (!confirm(`プレイリスト「${pl.name}」を削除しますか？`)) return;
+      const ok = await this.showConfirmDialog('プレイリスト削除', `プレイリスト「${pl.name}」を削除しますか？`);
+      if (!ok) return;
       if (this.bgmPlayer.playingPlaylistId === pl.id) {
         this.stopBgmImmediately();
       }
@@ -2440,9 +2870,12 @@ class HikarungProApp {
       if (files.length === 0) return;
       const pl = this.getCurrentPlaylist();
       let added = 0;
-      for (const file of files) {
+      for (let fIdx = 0; fIdx < files.length; fIdx++) {
+        const file = files[fIdx];
         try {
-          const info = await this.importAudioFileToRecord(file);
+          if (files.length >= 2) this.showToast(`BGM読み込み中... (${fIdx + 1}/${files.length})`);
+          // keepInRam = false for bulk BGM imports to prevent iPadOS OOM crash when adding 10+ songs
+          const info = await this.importAudioFileToRecord(file, files.length === 1);
           pl.tracks.push({
             id: `trk_${Date.now()}_${added}`,
             name: info.name,
@@ -2456,6 +2889,10 @@ class HikarungProApp {
             pitch: 0
           });
           added++;
+          // Save incrementally every 3 tracks so progress is never lost
+          if (added % 3 === 0) {
+            await this.saveAppState();
+          }
         } catch (err) {
           this.showToast(err.message);
         }
@@ -2546,6 +2983,13 @@ class HikarungProApp {
       this.saveAppState();
     });
 
+    document.getElementById('selectBgmMonoLink').addEventListener('change', (e) => {
+      this.state.bgmMonoLink = e.target.value;
+      this.saveAppState();
+      const labelMap = { off: 'OFF', stop: '排他 (即停止)', fade: '排他 (フェード)' };
+      this.showToast(`BGMデッキ MONO連動: ${labelMap[e.target.value] || e.target.value}`);
+    });
+
     // ==================== EDITOR MODAL EVENTS ====================
     document.getElementById('btnCloseEditor').addEventListener('click', () => {
       this.stopEditorPreview();
@@ -2616,8 +3060,44 @@ class HikarungProApp {
       const buf = this.editorDraft && this.editorDraft.audioId
         ? this.audioBuffers.get(this.editorDraft.audioId)
         : null;
-      return buf ? ratio * buf.duration : 0;
+      if (!buf) return 0;
+      const { viewStart, viewDur } = this.getWaveformViewWindow(buf.duration);
+      return Math.max(0, Math.min(buf.duration, viewStart + ratio * viewDur));
     };
+
+    wfCanvas.addEventListener('wheel', (e) => {
+      if (!this.editorDraft || !this.editorDraft.audioId) return;
+      e.preventDefault();
+      const rect = wfCanvas.getBoundingClientRect();
+      const mouseRatio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      const buf = this.audioBuffers.get(this.editorDraft.audioId);
+      if (!buf) return;
+      const { startFrac, endFrac } = this.getWaveformViewWindow(buf.duration);
+      const focusFrac = startFrac + mouseRatio * (endFrac - startFrac);
+      const factor = e.deltaY < 0 ? 1.5 : (1 / 1.5);
+      this.setEditorZoom(this.editorZoom * factor, focusFrac);
+    }, { passive: false });
+
+    document.getElementById('btnZoomIn').addEventListener('click', () => {
+      this.setEditorZoom(this.editorZoom * 2);
+    });
+    document.getElementById('btnZoomOut').addEventListener('click', () => {
+      this.setEditorZoom(this.editorZoom / 2);
+    });
+    document.getElementById('btnZoomReset').addEventListener('click', () => {
+      this.setEditorZoom(1, 0);
+    });
+    document.getElementById('btnZoomFocusIn').addEventListener('click', () => {
+      if (this.editorDraft) this.focusEditorZoomOnTime(Number(this.editorDraft.trimStart) || 0);
+    });
+    document.getElementById('btnZoomFocusOut').addEventListener('click', () => {
+      if (this.editorDraft) this.focusEditorZoomOnTime(Number(this.editorDraft.trimEnd) || 0);
+    });
+    document.getElementById('sliderWaveformPan').addEventListener('input', (e) => {
+      const maxPan = Math.max(0, 1 - 1 / Math.max(1, this.editorZoom));
+      this.editorPanStart = (Number(e.target.value) / 1000) * maxPan;
+      this.drawEditorWaveform();
+    });
 
     wfCanvas.addEventListener('pointerdown', (e) => {
       if (!this.editorDraft || !this.editorDraft.audioId) return;
@@ -2721,16 +3201,18 @@ class HikarungProApp {
       e.target.value = '';
     });
     document.getElementById('btnFactoryReset').addEventListener('click', async () => {
-      if (!confirm('すべての音源と設定を初期状態（空）にリセットしますか？')) return;
+      const ok = await this.showConfirmDialog('全データの初期化', 'すべての音源と設定を初期状態（初期サンプル構成）にリセットしますか？');
+      if (!ok) return;
       this.panicStopAll();
       await this.db.clearAll();
       location.reload();
     });
 
-    // ==================== EXTERNAL KEYBOARD SHORTCUTS ====================
+    // ==================== EXTERNAL KEYBOARD SHORTCUTS (POSITION-BASED) ====================
     window.addEventListener('keydown', (e) => {
       if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
       if (!document.getElementById('editorModal').classList.contains('hidden')) return;
+      if (!document.getElementById('dialogModal').classList.contains('hidden')) return;
 
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -2744,7 +3226,7 @@ class HikarungProApp {
       if (!bank) return;
       const count = this.getVisiblePadCount();
       for (let i = 0; i < count; i++) {
-        if (bank.pads[i] && bank.pads[i].key === pressed) {
+        if (this.getSlotKey(i) === pressed) {
           e.preventDefault();
           this.triggerPad(i);
           break;
@@ -2760,10 +3242,84 @@ class HikarungProApp {
       const count = this.getVisiblePadCount();
       for (let i = 0; i < count; i++) {
         const pad = bank.pads[i];
-        if (pad && pad.key === released && pad.triggerMode === 'gate') {
+        if (pad && this.getSlotKey(i) === released && pad.triggerMode === 'gate') {
           this.stopPadVoices(pad.id, Number(pad.fadeOut) || 0.15);
         }
       }
+    });
+  }
+
+  // ==================== NON-BLOCKING CUSTOM DIALOGS (NEVER STOPS AUDIO) ====================
+  showPromptDialog(title, message, defaultValue = '') {
+    return new Promise((resolve) => {
+      const modal = document.getElementById('dialogModal');
+      const titleEl = document.getElementById('dialogTitle');
+      const msgEl = document.getElementById('dialogMessage');
+      const inputEl = document.getElementById('dialogInput');
+      const btnOk = document.getElementById('btnDialogOk');
+      const btnCancel = document.getElementById('btnDialogCancel');
+      const btnClose = document.getElementById('btnDialogClose');
+
+      titleEl.textContent = title;
+      msgEl.textContent = message;
+      inputEl.value = defaultValue;
+      inputEl.classList.remove('hidden');
+      modal.classList.remove('hidden');
+      setTimeout(() => {
+        inputEl.focus();
+        inputEl.select();
+      }, 30);
+
+      const finish = (result) => {
+        modal.classList.add('hidden');
+        btnOk.onclick = null;
+        btnCancel.onclick = null;
+        btnClose.onclick = null;
+        inputEl.onkeydown = null;
+        resolve(result);
+      };
+
+      btnOk.onclick = () => finish(inputEl.value);
+      btnCancel.onclick = () => finish(null);
+      btnClose.onclick = () => finish(null);
+      inputEl.onkeydown = (ev) => {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          finish(inputEl.value);
+        } else if (ev.key === 'Escape') {
+          ev.preventDefault();
+          finish(null);
+        }
+      };
+    });
+  }
+
+  showConfirmDialog(title, message) {
+    return new Promise((resolve) => {
+      const modal = document.getElementById('dialogModal');
+      const titleEl = document.getElementById('dialogTitle');
+      const msgEl = document.getElementById('dialogMessage');
+      const inputEl = document.getElementById('dialogInput');
+      const btnOk = document.getElementById('btnDialogOk');
+      const btnCancel = document.getElementById('btnDialogCancel');
+      const btnClose = document.getElementById('btnDialogClose');
+
+      titleEl.textContent = title;
+      msgEl.textContent = message;
+      inputEl.classList.add('hidden');
+      modal.classList.remove('hidden');
+
+      const finish = (result) => {
+        modal.classList.add('hidden');
+        btnOk.onclick = null;
+        btnCancel.onclick = null;
+        btnClose.onclick = null;
+        resolve(result);
+      };
+
+      btnOk.onclick = () => finish(true);
+      btnCancel.onclick = () => finish(false);
+      btnClose.onclick = () => finish(false);
     });
   }
 

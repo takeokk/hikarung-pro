@@ -102,9 +102,20 @@
 
     <!-- ==================== MAIN WORKSPACE ==================== -->
     <main class="workspace">
-      <!-- Left/Center: Sampler Pad Grid -->
+      <!-- Left/Center: Sampler Pad Grid + Stereo VU Meter -->
       <section class="pad-section">
         <div id="padGrid" class="pad-grid grid-4x4"></div>
+
+        <!-- Master Stereo Output VU Meter (KLANG2-style bottom-left monitor) -->
+        <div class="vu-meter-panel" aria-label="マスター出力VUメーター">
+          <div class="vu-meter-left">
+            <span id="vuOnAirLed" class="vu-led">OUTPUT</span>
+            <span id="vuDbReadout" class="vu-db">-∞ dB</span>
+          </div>
+          <div class="vu-canvas-wrap">
+            <canvas id="vuMeterCanvas" width="760" height="44"></canvas>
+          </div>
+        </div>
       </section>
 
       <!-- Right: BGM Playlist Deck -->
@@ -163,13 +174,21 @@
               </select>
             </div>
             <div class="bgm-opt-item">
-              <label for="selectBgmXfade">曲間クロスフェード</label>
+              <label for="selectBgmXfade">曲間XFADE</label>
               <select id="selectBgmXfade" class="pill-select-sm">
                 <option value="0">なし (0秒)</option>
                 <option value="1.5">1.5秒</option>
                 <option value="3" selected>3.0秒</option>
                 <option value="5">5.0秒</option>
                 <option value="8">8.0秒</option>
+              </select>
+            </div>
+            <div class="bgm-opt-item">
+              <label for="selectBgmMonoLink" title="MONO設定のパッドと排他連動（どちらかを再生するともう一方を自動停止）">MONO連動</label>
+              <select id="selectBgmMonoLink" class="pill-select-sm">
+                <option value="off" selected>OFF</option>
+                <option value="stop">排他 (即停止)</option>
+                <option value="fade">排他 (フェード)</option>
               </select>
             </div>
           </div>
@@ -273,6 +292,22 @@
             </div>
           </div>
 
+          <!-- Waveform Zoom & Pan Bar -->
+          <div class="waveform-zoom-bar">
+            <div class="wf-zoom-btns">
+              <button id="btnZoomOut" class="btn-smart" type="button" title="波形を縮小">🔍−</button>
+              <span id="labelZoomLevel" class="wf-zoom-readout">1.0x</span>
+              <button id="btnZoomIn" class="btn-smart" type="button" title="波形を拡大して細かいトリム調整">🔍＋</button>
+              <button id="btnZoomFocusIn" class="btn-smart" type="button" title="開始位置(IN)周辺へ移動">📍IN</button>
+              <button id="btnZoomFocusOut" class="btn-smart" type="button" title="終了位置(OUT)周辺へ移動">📍OUT</button>
+              <button id="btnZoomReset" class="btn-smart" type="button" title="全体表示に戻す">全体</button>
+            </div>
+            <div class="wf-pan-wrap">
+              <span class="wf-pan-label">表示位置</span>
+              <input id="sliderWaveformPan" type="range" min="0" max="1000" value="0" class="slider-full" disabled>
+            </div>
+          </div>
+
           <!-- Trim Sliders & Preview -->
           <div class="trim-controls-grid">
             <div class="trim-control-box">
@@ -362,7 +397,7 @@
       <div class="modal-header">
         <div class="modal-title-group">
           <h2 class="modal-title">💾 HIKARUNG-PRO 管理メニュー</h2>
-          <span id="menuVersionBadge" class="version-badge">v2.8.0</span>
+          <span id="menuVersionBadge" class="version-badge">v2.9.0</span>
         </div>
         <button id="btnCloseMenuModal" class="btn-close" type="button">✕</button>
       </div>
@@ -370,7 +405,7 @@
         <div class="menu-section">
           <div class="menu-section-head">
             <h3>🔄 アプリ本体の更新（データ保持アップデート）</h3>
-            <span id="menuVersionDetail" class="version-detail">現在のバージョン: v2.8.0</span>
+            <span id="menuVersionDetail" class="version-detail">現在のバージョン: v2.9.0</span>
           </div>
           <p class="section-desc">通信可能な状態（GitHub / Tailscale / Wi-Fi接続時）で下のボタンを押すと、<strong>iPad内に登録した音源やパッド・プレイリストの設定を残したまま、アプリ本体（キャッシュ）だけを最新版に更新</strong>します。</p>
           <button id="btnUpdateAppCache" class="btn-primary-lg" type="button">🔄 アプリ本体を最新に更新して再読み込み</button>
@@ -379,10 +414,10 @@
         <div class="menu-section">
           <h3>💡 クイック操作ガイド（最新仕様）</h3>
           <ul class="guide-steps">
-            <li><strong>パッド編集＆場所入替:</strong> 上部の「🛠️ 編集 EDIT」モード時、<strong>短くタップ</strong>で波形トリミング・音量（最大300%）・フェード編集を開き、<strong>長押し（ロングタップ）＋スワイプ</strong>でパッドの位置を入れ替えられます。</li>
-            <li><strong>30秒以上の音源登録:</strong> パッドに30秒以上の長尺音源を追加すると、自動的に発音モードが <code>X-FADE（クロスフェード）</code> に初期設定されます。</li>
-            <li><strong>BGMデッキ＆秒数シーク:</strong> シークバーを左右にドラッグして0.1秒単位で再生位置を探せます。再生中に別プレイリストを開いて曲の確認・編集も可能です。</li>
-            <li><strong>裏画面（バックグラウンド）再生＆省電力:</strong> 再生中に別アプリやロック画面へ移っても音が途切れず継続し、無音待機中は描画ループを完全停止してバッテリー消費を抑えます。</li>
+            <li><strong>パッド編集＆場所入替:</strong> 「🛠️ 編集 EDIT」モード時、<strong>短くタップ</strong>で波形ズーム対応トリミング・音量（最大300%）・フェード編集を開き、<strong>長押し＋スワイプ</strong>でパッドの位置を入れ替えられます（キーボード割当はパッド位置に固定）。</li>
+            <li><strong>30秒以上の音源登録:</strong> パッドに30秒以上の長尺音源を追加すると、自動で <code>X-FADE</code> が初期選択されます。</li>
+            <li><strong>BGMデッキ＆MONO連動:</strong> シークバーのドラッグで0.1秒単位の秒数探索が可能。<code>MONO連動</code> をONにすると、MONOパッドとBGMデッキが排他連動して音被りを防ぎます。</li>
+            <li><strong>出力VUメーター＆省電力:</strong> パッド下部の大型ステレオVUメーターで実際の出力レベルを常時確認可能。無音待機時は描画ループを完全停止してバッテリー消費を抑えます。</li>
           </ul>
         </div>
 
@@ -397,9 +432,27 @@
 
         <div class="menu-section danger-zone">
           <h3>⚠️ 全データの初期化</h3>
-          <p class="section-desc">追加・編集したすべての音源と設定を消去し、初期サンプル（6音源）のみが登録された工場出荷状態へ戻します。</p>
+          <p class="section-desc">追加・編集したすべての音源と設定を消去し、初期サンプル（6音源）のみが登録された状態へ戻します。</p>
           <button id="btnFactoryReset" class="btn-danger-outline" type="button">すべての音源・設定を初期状態（初期サンプル構成）に戻す</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== NON-BLOCKING CUSTOM DIALOG MODAL ==================== -->
+  <div id="dialogModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-card dialog-modal-card">
+      <div class="modal-header">
+        <h2 id="dialogTitle" class="modal-title">確認</h2>
+        <button id="btnDialogClose" class="btn-close" type="button">✕</button>
+      </div>
+      <div class="modal-body">
+        <p id="dialogMessage" class="section-desc"></p>
+        <input id="dialogInput" type="text" class="text-input hidden" autocomplete="off">
+      </div>
+      <div class="modal-footer">
+        <button id="btnDialogCancel" class="btn-secondary-lg" type="button">キャンセル</button>
+        <button id="btnDialogOk" class="btn-primary-lg" type="button">OK</button>
       </div>
     </div>
   </div>
