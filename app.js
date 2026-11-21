@@ -3,7 +3,13 @@
  * Zero external dependencies. Web Audio API + IndexedDB + Service Worker.
  */
 
-const APP_VERSION = 'v2.9.0';
+const APP_VERSION = 'v3.0.0';
+
+function safeNum(val, fallback) {
+  if (val === null || val === undefined || val === '') return fallback;
+  const n = Number(val);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 const PAD_COLORS = [
   { id: 'cyan', hex: '#06b6d4', label: 'シアン' },
@@ -221,6 +227,7 @@ class HikarungProApp {
     this.audioCtx = null;
     this.offlineDecodeCtx = null;
     this.masterMixBus = null;
+    this.masterLimiter = null;
     this.masterSeGain = null;
     this.masterBgmGain = null;
     this.analyserL = null;
@@ -232,11 +239,18 @@ class HikarungProApp {
     this.audioBuffers = new Map();
     this.audioMeta = new Map(); // Map<audioId, { name, duration }>
     this.longBufferOrder = []; // LRU list of long (>=30s) AudioBuffers kept in RAM (max 3)
+    this.pendingDecodes = new Map(); // Deduplicate concurrent decodeAudioData calls
 
     // Active Pad Voices: Map<padId, Set<VoiceObj>>
     this.activePadVoices = new Map();
-    // Cached DOM elements for active pad progress: Map<padId, { bar, timeEl }>
+    // Cached DOM elements for active pad progress: Map<padId, { padEl, bar, timeEl, miniControls }>
     this.padDomCache = new Map();
+    // Async race guards
+    this.bgmPlaySeq = 0;
+    this.padTriggerSeq = new Map();
+    this.gatePressedPads = new Set();
+    this.bgmPrefetchedId = null;
+    this.saveStateDebounceTimer = null;
 
     // App State (persisted to IndexedDB)
     this.state = {
@@ -317,6 +331,29 @@ class HikarungProApp {
   }
 
   async updateAppCache() {
+    if (window.__IS_STANDALONE_HTML__) {
+      this.showToast('単体HTML版のためオンライン更新は不要です');
+      return;
+    }
+    if (!navigator.onLine) {
+      this.showToast('⚠️ オフラインのため更新できません（現在のアプリは安全に保護されました）');
+      return;
+    }
+    const anyPlaying = this.activePadVoices.size > 0 || this.bgmPlayer.isPlaying;
+    if (anyPlaying) {
+      const ok = await this.showConfirmDialog('アプリ更新の確認', '現在音声が再生中です。更新すると再読み込みで音が止まりますがよろしいですか？');
+      if (!ok) return;
+    }
+
+    this.showToast('サーバーへの接続を確認中...');
+    try {
+      const probe = await fetch('./sw.js', { cache: 'no-store' });
+      if (!probe.ok) throw new Error('offline');
+    } catch (_) {
+      this.showToast('⚠️ サーバーに接続できないため更新を中止しました（現在のアプリを維持します）');
+      return;
+    }
+
     this.showToast('最新版を取得しています...');
     try {
       if ('serviceWorker' in navigator) {
@@ -347,10 +384,23 @@ class HikarungProApp {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
       this.audioCtx = new AudioContextClass({ latencyHint: 'interactive' });
 
-      // Master Mix Bus -> Output + Stereo L/R VU Meter Analysers
+      // Master Mix Bus (explicit 2ch stereo so mono SEs always appear on both L/R VU channels)
       this.masterMixBus = this.audioCtx.createGain();
       this.masterMixBus.gain.value = 1.0;
-      this.masterMixBus.connect(this.audioCtx.destination);
+      this.masterMixBus.channelCount = 2;
+      this.masterMixBus.channelCountMode = 'explicit';
+      this.masterMixBus.channelInterpretation = 'speakers';
+
+      // Studio Brickwall Limiter to prevent digital clipping on high gain / POLY stacking
+      this.masterLimiter = this.audioCtx.createDynamicsCompressor();
+      this.masterLimiter.threshold.value = -1.0;
+      this.masterLimiter.knee.value = 3.0;
+      this.masterLimiter.ratio.value = 20.0;
+      this.masterLimiter.attack.value = 0.002;
+      this.masterLimiter.release.value = 0.08;
+
+      this.masterMixBus.connect(this.masterLimiter);
+      this.masterLimiter.connect(this.audioCtx.destination);
 
       const splitter = this.audioCtx.createChannelSplitter(2);
       this.analyserL = this.audioCtx.createAnalyser();
@@ -362,7 +412,7 @@ class HikarungProApp {
       this.analyserBufL = new Float32Array(this.analyserL.fftSize);
       this.analyserBufR = new Float32Array(this.analyserR.fftSize);
 
-      this.masterMixBus.connect(splitter);
+      this.masterLimiter.connect(splitter);
       splitter.connect(this.analyserL, 0);
       splitter.connect(this.analyserR, 1);
 
@@ -441,12 +491,12 @@ class HikarungProApp {
       audio.style.display = 'none';
       document.body.appendChild(audio);
 
-      // Use HTML5 audio timeupdate in background to drive BGM crossfades & AudioContext resume
+      // Use HTML5 audio timeupdate in background to drive BGM crossfades without multiplying timers
       audio.addEventListener('timeupdate', () => {
         if (this.audioCtx && (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted')) {
           this.audioCtx.resume().catch(() => {});
         }
-        if (document.hidden) {
+        if (document.hidden && this.bgTimerId === null && this.animFrameId === null) {
           this.runAnimationTick(performance.now());
         }
       });
@@ -796,9 +846,57 @@ class HikarungProApp {
       this.touchLongBufferLRU(audioId, existing.duration);
       return existing;
     }
-    const rec = await this.db.getAudioFile(audioId);
-    if (!rec) return null;
-    return await this.decodeAndCacheAudioRecord(rec, true);
+    if (this.pendingDecodes.has(audioId)) {
+      return await this.pendingDecodes.get(audioId);
+    }
+    const p = (async () => {
+      try {
+        const rec = await this.db.getAudioFile(audioId);
+        if (!rec) return null;
+        return await this.decodeAndCacheAudioRecord(rec, true);
+      } finally {
+        this.pendingDecodes.delete(audioId);
+      }
+    })();
+    this.pendingDecodes.set(audioId, p);
+    return await p;
+  }
+
+  async gcOrphanAudioFiles() {
+    try {
+      const referenced = new Set();
+      for (const bank of this.state.banks) {
+        for (const pad of bank.pads) {
+          if (pad.audioId) referenced.add(pad.audioId);
+        }
+      }
+      for (const pl of this.state.playlists) {
+        for (const trk of pl.tracks) {
+          if (trk.audioId) referenced.add(trk.audioId);
+        }
+      }
+      if (this.editorDraft && this.editorDraft.audioId) {
+        referenced.add(this.editorDraft.audioId);
+      }
+
+      const allRecords = await this.db.getAllAudioFiles();
+      for (const rec of allRecords) {
+        if (!referenced.has(rec.id)) {
+          await this.db.deleteAudioFile(rec.id);
+          this.audioBuffers.delete(rec.id);
+          this.audioMeta.delete(rec.id);
+          this.longBufferOrder = this.longBufferOrder.filter((id) => id !== rec.id);
+        }
+      }
+    } catch (_) {}
+  }
+
+  saveAppStateDebounced() {
+    if (this.saveStateDebounceTimer) clearTimeout(this.saveStateDebounceTimer);
+    this.saveStateDebounceTimer = setTimeout(() => {
+      this.saveStateDebounceTimer = null;
+      this.saveAppState();
+    }, 250);
   }
 
   async decodeAndCacheAudioRecord(fileRec, keepInRam = true) {
@@ -871,6 +969,15 @@ class HikarungProApp {
     this.state.slotKeys[g][slotIndex] = String(keyChar || '').trim().toUpperCase();
   }
 
+  hasNonFadingPadVoice(padId) {
+    const set = this.activePadVoices.get(padId);
+    if (!set || set.size === 0) return false;
+    for (const v of set) {
+      if (!v.isFadingOut) return true;
+    }
+    return false;
+  }
+
   // ==================== SAMPLER PAD AUDIO ENGINE ====================
   async triggerPad(padIndex) {
     this.ensureAudioContext();
@@ -878,9 +985,19 @@ class HikarungProApp {
     if (!bank) return;
     const pad = bank.pads[padIndex];
     if (!pad || !pad.audioId) {
-      this.openEditorForPad(padIndex);
+      // Only open editor on empty pad in EDIT mode (LIVE mode prevents accidental popups)
+      if (this.isEditMode) {
+        this.openEditorForPad(padIndex);
+      }
       return;
     }
+
+    // Unlock HTML5 background audio synchronously inside the user gesture BEFORE any await
+    this.activateBackgroundKeepAlive();
+
+    const mode = pad.triggerMode || 'poly';
+    const seq = (this.padTriggerSeq.get(pad.id) || 0) + 1;
+    this.padTriggerSeq.set(pad.id, seq);
 
     let buffer = this.audioBuffers.get(pad.audioId);
     if (!buffer) {
@@ -889,15 +1006,17 @@ class HikarungProApp {
         this.showToast('音源データを読み込めませんでした');
         return;
       }
+      // Abort if another trigger/PANIC occurred or GATE finger was released while decoding
+      if (this.padTriggerSeq.get(pad.id) !== seq) return;
+      if (mode === 'gate' && !this.gatePressedPads.has(pad.id)) return;
     }
 
-    const mode = pad.triggerMode || 'poly';
+    const fadeOutSec = safeNum(pad.fadeOut, 2.0);
 
     if (mode === 'retrig') {
       this.stopPadVoices(pad.id, 0.03);
     } else if (mode === 'mono') {
-      const existing = this.activePadVoices.get(pad.id);
-      if (existing && existing.size > 0) {
+      if (this.hasNonFadingPadVoice(pad.id)) {
         this.stopPadVoices(pad.id, 0.05);
         return;
       }
@@ -905,18 +1024,17 @@ class HikarungProApp {
       // MONO連動: If BGM Playlist is linked to MONO group, stop/fade BGM deck
       if (this.bgmPlayer.isPlaying && this.state.bgmMonoLink && this.state.bgmMonoLink !== 'off') {
         if (this.state.bgmMonoLink === 'fade') {
-          this.fadeStopBgm(Number(this.state.bgmXfade) || 2.0);
+          this.fadeStopBgm(safeNum(this.state.bgmXfade, 2.0));
         } else {
           this.stopBgmImmediately();
         }
       }
     } else if (mode === 'xfade') {
-      const existing = this.activePadVoices.get(pad.id);
-      if (existing && existing.size > 0) {
-        this.stopPadVoices(pad.id, pad.fadeOut || 2.0);
+      if (this.hasNonFadingPadVoice(pad.id)) {
+        this.stopPadVoices(pad.id, Math.max(0.05, fadeOutSec));
         return;
       }
-      this.stopPadsByMode('xfade', pad.fadeOut || 2.5);
+      this.stopPadsByMode('xfade', Math.max(0.05, fadeOutSec));
     }
 
     this.startPadVoice(pad, buffer);
@@ -929,27 +1047,28 @@ class HikarungProApp {
     const source = ctx.createBufferSource();
     source.buffer = buffer;
 
-    const speed = Math.max(0.25, Math.min(3.0, Number(pad.speed) || 1.0));
-    const pitchSemi = Number(pad.pitch) || 0;
+    const speed = Math.max(0.25, Math.min(3.0, safeNum(pad.speed, 1.0)));
+    const pitchSemi = safeNum(pad.pitch, 0);
     source.playbackRate.value = speed;
     if ('detune' in source) {
       source.detune.value = pitchSemi * 100;
     }
     const effectiveRate = speed * Math.pow(2, pitchSemi / 12);
 
-    const trimStart = Math.max(0, Math.min(buffer.duration - 0.01, Number(pad.trimStart) || 0));
-    const trimEnd = (Number(pad.trimEnd) > trimStart && Number(pad.trimEnd) <= buffer.duration)
-      ? Number(pad.trimEnd)
-      : buffer.duration;
+    const trimStart = Math.max(0, Math.min(buffer.duration - 0.01, safeNum(pad.trimStart, 0)));
+    const rawEnd = safeNum(pad.trimEnd, buffer.duration);
+    const trimEnd = (rawEnd > trimStart && rawEnd <= buffer.duration) ? rawEnd : buffer.duration;
     const regionDur = Math.max(0.02, trimEnd - trimStart);
     const playWallDuration = regionDur / effectiveRate;
 
     const voiceGain = ctx.createGain();
-    const targetGain = Math.max(0, (Number(pad.gain) ?? 100) / 100);
+    const targetGain = Math.max(0, safeNum(pad.gain, 100) / 100);
+    const configuredFadeIn = Math.max(0, safeNum(pad.fadeIn, 0));
+    const configuredFadeOut = Math.max(0, safeNum(pad.fadeOut, 2.0));
 
-    const fadeInSec = pad.triggerMode === 'xfade' && (!pad.fadeIn || pad.fadeIn < 0.3)
-      ? Math.min(2.0, pad.fadeOut || 1.5)
-      : Math.max(0, Number(pad.fadeIn) || 0);
+    const fadeInSec = (pad.triggerMode === 'xfade' && configuredFadeIn < 0.05)
+      ? Math.min(2.0, Math.max(0.3, configuredFadeOut))
+      : configuredFadeIn;
 
     if (fadeInSec > 0.02) {
       voiceGain.gain.setValueAtTime(0.0001, now);
@@ -968,13 +1087,13 @@ class HikarungProApp {
       source.loopEnd = trimEnd;
       source.start(now, trimStart);
     } else {
-      const autoFadeOut = Math.max(0, Number(pad.fadeOut) || 0);
-      if (autoFadeOut > 0.05 && playWallDuration > autoFadeOut * 1.6 && pad.triggerMode === 'xfade') {
-        const fadeStartWall = now + playWallDuration - autoFadeOut;
+      if (configuredFadeOut > 0.05 && playWallDuration > configuredFadeOut * 1.6 && pad.triggerMode === 'xfade') {
+        const fadeStartWall = now + playWallDuration - configuredFadeOut;
         voiceGain.gain.setValueAtTime(targetGain, fadeStartWall);
         voiceGain.gain.linearRampToValueAtTime(0.0001, now + playWallDuration);
       }
-      source.start(now, trimStart, regionDur);
+      // Web Audio spec: 3rd arg duration is wall-clock AudioContext seconds
+      source.start(now, trimStart, playWallDuration);
     }
 
     const voiceObj = {
@@ -1054,6 +1173,11 @@ class HikarungProApp {
   }
 
   panicStopAll() {
+    this.bgmPlaySeq++;
+    this.gatePressedPads.clear();
+    for (const padId of this.padTriggerSeq.keys()) {
+      this.padTriggerSeq.set(padId, (this.padTriggerSeq.get(padId) || 0) + 1);
+    }
     for (const padId of this.activePadVoices.keys()) {
       this.stopPadVoices(padId, 0.02);
     }
@@ -1065,19 +1189,18 @@ class HikarungProApp {
   // ==================== BGM PLAYLIST DECK ENGINE ====================
   applyBgmMonoLinkStopPads() {
     if (!this.state.bgmMonoLink || this.state.bgmMonoLink === 'off') return;
-    const fadeSec = this.state.bgmMonoLink === 'fade' ? (Number(this.state.bgmXfade) || 2.0) : 0.05;
+    const fadeSec = this.state.bgmMonoLink === 'fade' ? Math.max(0.05, safeNum(this.state.bgmXfade, 2.0)) : 0.05;
     this.stopPadsByMode('mono', fadeSec);
   }
 
   async playBgmTrack(index, crossfadeSec = 0, targetPlaylistId = null) {
     this.ensureAudioContext();
-    if (targetPlaylistId) {
-      this.bgmPlayer.playingPlaylistId = targetPlaylistId;
-    } else if (!this.bgmPlayer.playingPlaylistId) {
-      this.bgmPlayer.playingPlaylistId = this.state.currentPlaylistId;
-    }
+    // Unlock HTML5 background audio synchronously inside user gesture BEFORE await
+    this.activateBackgroundKeepAlive();
 
-    const pl = this.getPlayingPlaylist();
+    const seq = ++this.bgmPlaySeq;
+    const resolvedPlId = targetPlaylistId || this.bgmPlayer.playingPlaylistId || this.state.currentPlaylistId;
+    const pl = this.state.playlists.find((p) => p.id === resolvedPlId) || this.getCurrentPlaylist();
     if (!pl || pl.tracks.length === 0) {
       this.showToast('プレイリストに曲がありません。「＋音源ファイル追加」から追加してください');
       return;
@@ -1086,7 +1209,14 @@ class HikarungProApp {
     const safeIndex = ((index % pl.tracks.length) + pl.tracks.length) % pl.tracks.length;
     const track = pl.tracks[safeIndex];
     const buffer = await this.getOrDecodeAudioBuffer(track.audioId);
+
+    // Abort if stopped, panicked, or another track was requested while decoding
+    if (seq !== this.bgmPlaySeq) return;
+
     if (!buffer) {
+      this.bgmPlayer.isPlaying = false;
+      this.renderBgmTrackList();
+      this.updateBgmTransportUI();
       this.showToast('BGM音源データを読み込めませんでした');
       return;
     }
@@ -1101,6 +1231,7 @@ class HikarungProApp {
     this.bgmPlayer.playingPlaylistId = pl.id;
     this.bgmPlayer.currentTrackIndex = safeIndex;
     this.bgmPlayer.pausedAtOffset = 0;
+    this.bgmPrefetchedId = null;
     this.startBgmNodeFromOffset(track, buffer, 0, crossfadeSec);
     this.renderBgmTrackList();
   }
@@ -1112,26 +1243,25 @@ class HikarungProApp {
     const source = ctx.createBufferSource();
     source.buffer = buffer;
 
-    const speed = Math.max(0.25, Math.min(3.0, Number(track.speed) || 1.0));
-    const pitchSemi = Number(track.pitch) || 0;
+    const speed = Math.max(0.25, Math.min(3.0, safeNum(track.speed, 1.0)));
+    const pitchSemi = safeNum(track.pitch, 0);
     source.playbackRate.value = speed;
     if ('detune' in source) {
       source.detune.value = pitchSemi * 100;
     }
     const effectiveRate = speed * Math.pow(2, pitchSemi / 12);
 
-    const trimStart = Math.max(0, Math.min(buffer.duration - 0.02, Number(track.trimStart) || 0));
-    const trimEnd = (Number(track.trimEnd) > trimStart && Number(track.trimEnd) <= buffer.duration)
-      ? Number(track.trimEnd)
-      : buffer.duration;
+    const trimStart = Math.max(0, Math.min(buffer.duration - 0.02, safeNum(track.trimStart, 0)));
+    const rawEnd = safeNum(track.trimEnd, buffer.duration);
+    const trimEnd = (rawEnd > trimStart && rawEnd <= buffer.duration) ? rawEnd : buffer.duration;
     const regionDur = Math.max(0.05, trimEnd - trimStart);
     const startBufferPos = Math.min(trimEnd - 0.02, trimStart + offsetInTrimmedRegion);
     const remainBufferDur = Math.max(0.02, trimEnd - startBufferPos);
     const remainWallDur = remainBufferDur / effectiveRate;
 
     const gainNode = ctx.createGain();
-    const targetGain = Math.max(0, (Number(track.gain) ?? 100) / 100);
-    const fadeSec = Math.max(fadeInOverrideSec, Number(track.fadeIn) || 0);
+    const targetGain = Math.max(0, safeNum(track.gain, 100) / 100);
+    const fadeSec = Math.max(safeNum(fadeInOverrideSec, 0), safeNum(track.fadeIn, 0));
 
     if (fadeSec > 0.03) {
       gainNode.gain.setValueAtTime(0.0001, now);
@@ -1143,7 +1273,8 @@ class HikarungProApp {
     source.connect(gainNode);
     gainNode.connect(this.masterBgmGain);
 
-    source.start(now, startBufferPos, remainBufferDur);
+    // Web Audio spec: 3rd arg duration is wall-clock AudioContext seconds
+    source.start(now, startBufferPos, remainWallDur);
 
     const nodeObj = {
       source,
@@ -1199,6 +1330,7 @@ class HikarungProApp {
     this.ensureAudioContext();
 
     if (this.bgmPlayer.isPlaying && this.bgmPlayer.activeNode) {
+      this.bgmPlaySeq++;
       const node = this.bgmPlayer.activeNode;
       const elapsedWall = this.audioCtx.currentTime - node.startedAtCtxTime;
       const elapsedRegion = node.initialRegionOffset + elapsedWall * node.effectiveRate;
@@ -1210,10 +1342,15 @@ class HikarungProApp {
       return;
     }
 
+    // Unlock HTML5 background audio synchronously inside user gesture BEFORE await
+    this.activateBackgroundKeepAlive();
+    const seq = ++this.bgmPlaySeq;
+
     // Resume paused track in playingPlaylist, or start current viewed playlist if none paused
     let pl = this.getPlayingPlaylist();
     if (!this.bgmPlayer.pausedAtOffset || !pl || pl.tracks.length === 0) {
       this.bgmPlayer.playingPlaylistId = this.state.currentPlaylistId;
+      this.bgmPlayer.currentTrackIndex = 0;
       pl = this.getCurrentPlaylist();
     }
     if (!pl || pl.tracks.length === 0) {
@@ -1224,6 +1361,7 @@ class HikarungProApp {
     const idx = Math.min(this.bgmPlayer.currentTrackIndex, pl.tracks.length - 1);
     const track = pl.tracks[idx];
     const buffer = await this.getOrDecodeAudioBuffer(track.audioId);
+    if (seq !== this.bgmPlaySeq) return;
     if (!buffer) return;
     this.applyBgmMonoLinkStopPads();
     this.bgmPlayer.playingPlaylistId = pl.id;
@@ -1233,17 +1371,21 @@ class HikarungProApp {
   }
 
   fadeStopBgm(fadeSecOverride = null) {
-    const fadeSec = fadeSecOverride !== null ? fadeSecOverride : (Number(this.state.bgmXfade) || 2.5);
+    this.bgmPlaySeq++;
+    const fadeSec = fadeSecOverride !== null ? safeNum(fadeSecOverride, 2.5) : safeNum(this.state.bgmXfade, 2.5);
     this.bgmPlayer.pausedAtOffset = 0;
     this.bgmPlayer.isPlaying = false;
-    this.retireActiveBgmNode(fadeSec);
+    this.bgmPlayer.isCrossfadingNext = false;
+    this.retireActiveBgmNode(Math.max(0.04, fadeSec));
     this.renderBgmTrackList();
     this.updateBgmTransportUI();
   }
 
   stopBgmImmediately() {
+    this.bgmPlaySeq++;
     this.bgmPlayer.pausedAtOffset = 0;
     this.bgmPlayer.isPlaying = false;
+    this.bgmPlayer.isCrossfadingNext = false;
     this.retireActiveBgmNode(0.02);
     for (const fn of this.bgmPlayer.fadingNodes) {
       try { fn.source.stop(); } catch (_) { }
@@ -1254,7 +1396,7 @@ class HikarungProApp {
   }
 
   onBgmTrackNaturalEnd() {
-    if (!this.bgmPlayer.isPlaying) return;
+    if (!this.bgmPlayer.isPlaying || this.bgmPlayer.isCrossfadingNext) return;
     this.advanceBgmTrack(0.05);
   }
 
@@ -1363,8 +1505,9 @@ class HikarungProApp {
     }
 
     if (this.bgmPlayer.isPlaying) {
+      const seq = ++this.bgmPlaySeq;
       const buf = info.buffer || await this.getOrDecodeAudioBuffer(track.audioId);
-      if (!buf) return;
+      if (seq !== this.bgmPlaySeq || !buf) return;
       this.retireActiveBgmNode(0.025);
       this.startBgmNodeFromOffset(track, buf, info.targetOffset, 0.025);
     }
@@ -1372,14 +1515,15 @@ class HikarungProApp {
 
   // ==================== POWER-SAVING ON-DEMAND ANIMATION LOOP ====================
   startAnimationLoop() {
-    // Keep AudioContext alive when going to background if sounds are playing, or resume when returning
     document.addEventListener('visibilitychange', () => {
       if (!this.audioCtx) return;
       const anyPlaying = this.activePadVoices.size > 0 || this.bgmPlayer.isPlaying || Boolean(this.previewVoice);
-      if (anyPlaying && this.audioCtx.state === 'suspended') {
+      if (document.hidden && !anyPlaying && this.audioCtx.state === 'running') {
+        this.audioCtx.suspend().catch(() => {});
+      } else if (anyPlaying && (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted')) {
         this.audioCtx.resume().catch(() => {});
       } else if (!document.hidden) {
-        if (this.audioCtx.state === 'suspended') {
+        if (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted') {
           this.audioCtx.resume().catch(() => {});
         }
         this.wakeAnimationLoop();
@@ -1399,6 +1543,16 @@ class HikarungProApp {
   }
 
   runAnimationTick(nowMs) {
+    // Always clear any pending timers first so timer chains can NEVER multiply
+    if (this.bgTimerId !== null) {
+      clearTimeout(this.bgTimerId);
+      this.bgTimerId = null;
+    }
+    if (this.animFrameId !== null) {
+      cancelAnimationFrame(this.animFrameId);
+      this.animFrameId = null;
+    }
+
     const hasPads = this.activePadVoices.size > 0;
     const hasBgm = Boolean(this.bgmPlayer.isPlaying && this.bgmPlayer.activeNode);
     const hasPreview = Boolean(this.previewVoice && !document.getElementById('editorModal').classList.contains('hidden'));
@@ -1456,7 +1610,7 @@ class HikarungProApp {
         }
       }
 
-      // 2. Update BGM Now Playing & Auto-Crossfade check
+      // 2. Update BGM Now Playing, Prefetch Next Track & Auto-Crossfade check
       if (hasBgm) {
         const node = this.bgmPlayer.activeNode;
         const elapsedWall = now - node.startedAtCtxTime;
@@ -1485,11 +1639,26 @@ class HikarungProApp {
           }
         }
 
-        const xfadeSec = Number(this.state.bgmXfade) || 0;
+        const pl = this.getPlayingPlaylist();
+        const mode = this.state.bgmMode || 'all_loop';
+        const isLastOfSequence = mode === 'sequence' && pl && (this.bgmPlayer.currentTrackIndex + 1 >= pl.tracks.length);
+        const xfadeSec = Math.max(0, safeNum(this.state.bgmXfade, 0));
+
+        // Prefetch next track ~10s before crossfade so transitions are gapless
+        if (pl && pl.tracks.length > 1 && mode !== 'single' && !isLastOfSequence && remainWall <= xfadeSec + 10) {
+          const nextIdx = (this.bgmPlayer.currentTrackIndex + 1) % pl.tracks.length;
+          const nextTrk = pl.tracks[nextIdx];
+          if (nextTrk && nextTrk.audioId && this.bgmPrefetchedId !== nextTrk.audioId && !this.audioBuffers.has(nextTrk.audioId)) {
+            this.bgmPrefetchedId = nextTrk.audioId;
+            this.getOrDecodeAudioBuffer(nextTrk.audioId).catch(() => {});
+          }
+        }
+
         if (
           xfadeSec > 0.1 &&
           !this.bgmPlayer.isCrossfadingNext &&
-          this.state.bgmMode !== 'single' &&
+          mode !== 'single' &&
+          !isLastOfSequence &&
           totalWall > xfadeSec * 1.8 &&
           remainWall <= xfadeSec
         ) {
@@ -1509,18 +1678,12 @@ class HikarungProApp {
       }
     }
 
-    // Schedule next tick: 250ms timer when backgrounded, lightweight 55ms timer when foregrounded (saves battery vs 120Hz rAF)
-    if (document.hidden) {
-      this.bgTimerId = setTimeout(() => {
-        this.bgTimerId = null;
-        this.runAnimationTick(performance.now());
-      }, 250);
-    } else {
-      this.bgTimerId = setTimeout(() => {
-        this.bgTimerId = null;
-        this.runAnimationTick(performance.now());
-      }, 55);
-    }
+    // Schedule next tick safely (only one timer ever active)
+    const nextDelay = document.hidden ? 250 : 55;
+    this.bgTimerId = setTimeout(() => {
+      this.bgTimerId = null;
+      this.runAnimationTick(performance.now());
+    }, nextDelay);
   }
 
   drawVuMeter(isActive) {
@@ -1662,7 +1825,12 @@ class HikarungProApp {
     const vDetail = document.getElementById('menuVersionDetail');
     if (vBadge) vBadge.textContent = APP_VERSION;
     if (vDetail) vDetail.textContent = `現在のバージョン: ${APP_VERSION}`;
+    const updSec = document.getElementById('menuUpdateSection');
+    if (updSec && window.__IS_STANDALONE_HTML__) {
+      updSec.style.display = 'none';
+    }
 
+    document.body.classList.toggle('edit-mode-active', this.isEditMode);
     document.getElementById('btnModeLive').classList.toggle('active', !this.isEditMode);
     document.getElementById('btnModeEdit').classList.toggle('active', this.isEditMode);
     document.getElementById('padGrid').classList.toggle('edit-mode', this.isEditMode);
@@ -1684,10 +1852,14 @@ class HikarungProApp {
     const container = document.getElementById('bankTabsContainer');
     container.innerHTML = '';
     for (const bank of this.state.banks) {
+      const hasPlayingInBank = bank.pads.some((p) => {
+        const set = this.activePadVoices.get(p.id);
+        return set && set.size > 0;
+      });
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = `bank-tab ${bank.id === this.state.currentBankId ? 'active' : ''}`;
-      btn.textContent = bank.name;
+      btn.className = `bank-tab ${bank.id === this.state.currentBankId ? 'active' : ''} ${hasPlayingInBank ? 'has-playing' : ''}`;
+      btn.textContent = hasPlayingInBank ? `● ${bank.name}` : bank.name;
       btn.addEventListener('click', () => {
         this.state.currentBankId = bank.id;
         this.saveAppState();
@@ -1780,6 +1952,9 @@ class HikarungProApp {
 
         // LIVE MODE: Trigger immediately on touch/press (0ms latency)
         if (!this.isEditMode) {
+          if (pad.triggerMode === 'gate') {
+            this.gatePressedPads.add(pad.id);
+          }
           this.triggerPad(i);
           return;
         }
@@ -1791,6 +1966,7 @@ class HikarungProApp {
         const offsetX = startX - rect.left;
         const offsetY = startY - rect.top;
         let isDragging = false;
+        let movedTooMuch = false;
         let ghostEl = null;
         let currentTargetEl = null;
 
@@ -1821,6 +1997,7 @@ class HikarungProApp {
 
           if (!isDragging) {
             if (Math.hypot(dx, dy) > 14) {
+              movedTooMuch = true;
               clearTimeout(longPressTimer);
             }
             return;
@@ -1870,7 +2047,7 @@ class HikarungProApp {
                 this.swapPads(i, targetIdx);
               }
             }
-          } else {
+          } else if (!movedTooMuch) {
             // Short tap in Edit Mode -> Open Editor
             this.openEditorForPad(i);
           }
@@ -1886,7 +2063,9 @@ class HikarungProApp {
 
       const handleGateRelease = () => {
         if (!this.isEditMode && pad.triggerMode === 'gate') {
-          this.stopPadVoices(pad.id, Number(pad.fadeOut) || 0.15);
+          this.gatePressedPads.delete(pad.id);
+          const gateRel = Math.min(0.2, Math.max(0.02, safeNum(pad.fadeOut, 0.08)));
+          this.stopPadVoices(pad.id, gateRel);
         }
       };
       padEl.addEventListener('pointerup', handleGateRelease);
@@ -1895,18 +2074,66 @@ class HikarungProApp {
 
       grid.appendChild(padEl);
       this.padDomCache.set(pad.id, {
+        padEl,
         bar: padEl.querySelector('.pad-progress-bar'),
-        timeEl: padEl.querySelector('.pad-time')
+        timeEl: padEl.querySelector('.pad-time'),
+        miniControls: padEl.querySelector('.pad-mini-controls'),
+        pad
       });
     }
   }
 
+  /**
+   * Differential single-pad visual update (NEVER rebuilds the grid DOM, so active
+   * GATE holds and Edit-mode drag gestures are never broken).
+   */
   updatePadVisualState(padId) {
-    const bank = this.getCurrentBank();
-    if (!bank) return;
-    const padIndex = bank.pads.findIndex((p) => p.id === padId);
-    if (padIndex === -1) return;
-    this.renderPadGrid();
+    this.renderBankTabs();
+    const cached = this.padDomCache.get(padId);
+    if (!cached) return;
+
+    const voices = this.activePadVoices.get(padId);
+    const isPlaying = Boolean(voices && voices.size > 0);
+    cached.padEl.classList.toggle('playing', isPlaying);
+
+    if (!isPlaying) {
+      if (cached.bar) {
+        cached.bar._lastW = '0%';
+        cached.bar.style.width = '0%';
+      }
+      if (cached.timeEl) {
+        const hasAudio = Boolean(cached.pad.audioId && (this.audioBuffers.has(cached.pad.audioId) || this.audioMeta.has(cached.pad.audioId)));
+        const durStr = hasAudio ? this.formatSeconds(this.getPadTrimmedDuration(cached.pad), true) : '--:--';
+        cached.timeEl._lastT = durStr;
+        cached.timeEl.textContent = durStr;
+      }
+    }
+
+    if (cached.miniControls) {
+      if (isPlaying) {
+        cached.miniControls.innerHTML = `
+          ${voices.size > 1 ? `<span class="pad-voice-count">×${voices.size}</span>` : ''}
+          <button type="button" class="pad-sub-btn fade-btn" title="個別フェードアウト">📉FADE</button>
+          <button type="button" class="pad-sub-btn stop-btn" title="即時停止">⏹</button>
+        `;
+        const fadeBtn = cached.miniControls.querySelector('.fade-btn');
+        if (fadeBtn) {
+          fadeBtn.addEventListener('pointerdown', (e) => {
+            e.stopPropagation();
+            this.stopPadVoices(padId, Math.max(0.05, safeNum(cached.pad.fadeOut, 2.0)));
+          });
+        }
+        const stopBtn = cached.miniControls.querySelector('.stop-btn');
+        if (stopBtn) {
+          stopBtn.addEventListener('pointerdown', (e) => {
+            e.stopPropagation();
+            this.stopPadVoices(padId, 0.03);
+          });
+        }
+      } else {
+        cached.miniControls.innerHTML = '';
+      }
+    }
   }
 
   async swapPads(fromIndex, toIndex) {
@@ -2032,11 +2259,13 @@ class HikarungProApp {
         this.renderBgmTrackList();
       });
 
-      item.querySelector('.btn-trk-del').addEventListener('click', (e) => {
+      item.querySelector('.btn-trk-del').addEventListener('click', async (e) => {
         e.stopPropagation();
-        const deletingPlayingTrack = isPlayingPlaylist && this.bgmPlayer.isPlaying && this.bgmPlayer.currentTrackIndex === idx;
-        if (deletingPlayingTrack) {
+        const deletingCurrentTrack = isPlayingPlaylist && this.bgmPlayer.currentTrackIndex === idx;
+        if (deletingCurrentTrack && this.bgmPlayer.isPlaying) {
           this.stopBgmImmediately();
+        } else if (deletingCurrentTrack) {
+          this.bgmPlayer.pausedAtOffset = 0;
         }
         pl.tracks.splice(idx, 1);
         if (isPlayingPlaylist) {
@@ -2046,7 +2275,8 @@ class HikarungProApp {
             this.bgmPlayer.currentTrackIndex = Math.max(0, pl.tracks.length - 1);
           }
         }
-        this.saveAppState();
+        await this.saveAppState();
+        this.gcOrphanAudioFiles();
         this.renderPlaylistSelector();
         this.renderBgmTrackList();
         this.updateBgmTransportUI();
@@ -2413,16 +2643,27 @@ class HikarungProApp {
     const buf = this.audioBuffers.get(d.audioId);
     if (!buf) return;
 
-    const data = buf.getChannelData(0);
+    const channels = [];
+    for (let c = 0; c < buf.numberOfChannels; c++) channels.push(buf.getChannelData(c));
+    const len = buf.length;
     const sr = buf.sampleRate;
     const threshold = 0.015;
 
+    const sampleMaxAbs = (idx) => {
+      let m = 0;
+      for (let c = 0; c < channels.length; c++) {
+        const a = Math.abs(channels[c][idx]);
+        if (a > m) m = a;
+      }
+      return m;
+    };
+
     let firstIdx = 0;
-    while (firstIdx < data.length && Math.abs(data[firstIdx]) < threshold) {
+    while (firstIdx < len && sampleMaxAbs(firstIdx) < threshold) {
       firstIdx++;
     }
-    let lastIdx = data.length - 1;
-    while (lastIdx > firstIdx && Math.abs(data[lastIdx]) < threshold) {
+    let lastIdx = len - 1;
+    while (lastIdx > firstIdx && sampleMaxAbs(lastIdx) < threshold) {
       lastIdx--;
     }
 
@@ -2446,15 +2687,17 @@ class HikarungProApp {
     const buf = this.audioBuffers.get(d.audioId);
     if (!buf) return;
 
-    const data = buf.getChannelData(0);
     const sr = buf.sampleRate;
-    const sIdx = Math.max(0, Math.floor((Number(d.trimStart) || 0) * sr));
-    const eIdx = Math.min(data.length, Math.ceil((Number(d.trimEnd) || buf.duration) * sr));
+    const sIdx = Math.max(0, Math.floor(safeNum(d.trimStart, 0) * sr));
+    const eIdx = Math.min(buf.length, Math.ceil(safeNum(d.trimEnd, buf.duration) * sr));
 
     let peak = 0;
-    for (let i = sIdx; i < eIdx; i++) {
-      const abs = Math.abs(data[i]);
-      if (abs > peak) peak = abs;
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const data = buf.getChannelData(c);
+      for (let i = sIdx; i < eIdx; i++) {
+        const abs = Math.abs(data[i]);
+        if (abs > peak) peak = abs;
+      }
     }
 
     if (peak < 0.001) {
@@ -2486,22 +2729,21 @@ class HikarungProApp {
     const source = ctx.createBufferSource();
     source.buffer = buf;
 
-    const speed = Number(d.speed) || 1.0;
-    const pitch = Number(d.pitch) || 0;
+    const speed = Math.max(0.25, Math.min(3.0, safeNum(d.speed, 1.0)));
+    const pitch = safeNum(d.pitch, 0);
     source.playbackRate.value = speed;
     if ('detune' in source) source.detune.value = pitch * 100;
     const effectiveRate = speed * Math.pow(2, pitch / 12);
 
-    const trimStart = Math.max(0, Number(d.trimStart) || 0);
-    const trimEnd = (Number(d.trimEnd) > trimStart && Number(d.trimEnd) <= buf.duration)
-      ? Number(d.trimEnd)
-      : buf.duration;
+    const trimStart = Math.max(0, Math.min(buf.duration - 0.02, safeNum(d.trimStart, 0)));
+    const rawEnd = safeNum(d.trimEnd, buf.duration);
+    const trimEnd = (rawEnd > trimStart && rawEnd <= buf.duration) ? rawEnd : buf.duration;
     const regionDur = Math.max(0.02, trimEnd - trimStart);
     const wallDur = regionDur / effectiveRate;
 
     const gainNode = ctx.createGain();
-    const targetGain = (Number(d.gain ?? 100) / 100);
-    const fadeIn = Number(d.fadeIn) || 0;
+    const targetGain = Math.max(0, safeNum(d.gain, 100) / 100);
+    const fadeIn = Math.max(0, safeNum(d.fadeIn, 0));
     if (fadeIn > 0.02) {
       gainNode.gain.setValueAtTime(0.0001, now);
       gainNode.gain.linearRampToValueAtTime(targetGain, now + Math.min(fadeIn, wallDur));
@@ -2511,9 +2753,9 @@ class HikarungProApp {
 
     source.connect(gainNode);
     gainNode.connect(this.masterSeGain);
-    source.start(now, trimStart, regionDur);
+    source.start(now, trimStart, wallDur);
 
-    this.previewVoice = {
+    const voiceObj = {
       source,
       gainNode,
       startedAt: now,
@@ -2521,10 +2763,13 @@ class HikarungProApp {
       trimEnd,
       effectiveRate
     };
+    this.previewVoice = voiceObj;
 
     source.onended = () => {
-      this.previewVoice = null;
-      this.drawEditorWaveform();
+      if (this.previewVoice === voiceObj) {
+        this.previewVoice = null;
+        this.drawEditorWaveform();
+      }
     };
     this.wakeAnimationLoop();
   }
@@ -2625,31 +2870,77 @@ class HikarungProApp {
 
   async importFullBackup(file) {
     try {
+      const ok = await this.showConfirmDialog(
+        'バックアップの復元',
+        `「${file.name}」から復元すると、現在の音源と設定がすべて上書きされます。よろしいですか？`
+      );
+      if (!ok) return;
+
+      this.showToast('バックアップファイルを検証中...');
       const text = await file.text();
       const payload = JSON.parse(text);
-      if (!payload || !payload.state || !Array.isArray(payload.audioFiles)) {
-        throw new Error('無効なバックアップファイルです');
+      if (
+        !payload ||
+        !payload.state ||
+        !Array.isArray(payload.state.banks) ||
+        payload.state.banks.length === 0 ||
+        !Array.isArray(payload.state.playlists) ||
+        !Array.isArray(payload.audioFiles)
+      ) {
+        throw new Error('無効なバックアップファイル形式です');
+      }
+
+      // Pre-validate all base64 entries BEFORE clearing existing DB (prevents data loss on corrupt file)
+      const preparedRecords = [];
+      for (const item of payload.audioFiles) {
+        if (!item || !item.id || typeof item.base64 !== 'string') {
+          throw new Error('バックアップ内の音源データが破損しています');
+        }
+        const arrayBuffer = this.base64ToArrayBuffer(item.base64);
+        preparedRecords.push({
+          id: item.id,
+          name: item.name || '音源',
+          mimeType: item.mimeType || 'audio/wav',
+          duration: safeNum(item.duration, 0),
+          arrayBuffer
+        });
       }
 
       this.panicStopAll();
       await this.db.clearAll();
       this.audioBuffers.clear();
       this.audioMeta.clear();
+      this.longBufferOrder = [];
+      this.pendingDecodes.clear();
+      this.bgmPlayer.playingPlaylistId = null;
+      this.bgmPlayer.currentTrackIndex = 0;
+      this.bgmPlayer.pausedAtOffset = 0;
 
-      for (const item of payload.audioFiles) {
-        const arrayBuffer = this.base64ToArrayBuffer(item.base64);
-        const rec = {
-          id: item.id,
-          name: item.name,
-          mimeType: item.mimeType || 'audio/wav',
-          duration: item.duration || 0,
-          arrayBuffer
-        };
+      for (const rec of preparedRecords) {
         await this.db.saveAudioFile(rec);
-        await this.decodeAndCacheAudioRecord(rec);
+        this.audioMeta.set(rec.id, { name: rec.name, duration: rec.duration });
+        // Only pre-decode short SEs (<30s) into RAM; keep long BGM tracks lazy-decoded to prevent OOM
+        if (rec.duration > 0 && rec.duration < 30) {
+          await this.decodeAndCacheAudioRecord(rec, true);
+        }
       }
 
-      this.state = payload.state;
+      // Merge onto default state so older backups don't lose newly added properties
+      this.state = Object.assign({
+        gridSize: '4x4',
+        masterVol: 100,
+        masterFadeSec: 3.0,
+        currentBankId: payload.state.banks[0].id,
+        banks: [],
+        currentPlaylistId: payload.state.playlists[0]?.id || 'pl_1',
+        playlists: [],
+        bgmVol: 85,
+        bgmMode: 'all_loop',
+        bgmXfade: 3.0,
+        bgmMonoLink: 'off',
+        slotKeys: {}
+      }, payload.state);
+
       await this.saveAppState();
       this.renderAll();
       document.getElementById('menuModal').classList.add('hidden');
@@ -2697,7 +2988,18 @@ class HikarungProApp {
     });
 
     document.getElementById('selectGridSize').addEventListener('change', (e) => {
+      const prevCount = this.getVisiblePadCount();
       this.state.gridSize = e.target.value;
+      const newCount = this.getVisiblePadCount();
+      // Stop any playing pads that became hidden after shrinking grid size
+      if (newCount < prevCount) {
+        const bank = this.getCurrentBank();
+        if (bank) {
+          for (let i = newCount; i < bank.pads.length; i++) {
+            this.stopPadVoices(bank.pads[i].id, 0.05);
+          }
+        }
+      }
       this.saveAppState();
       this.renderPadGrid();
     });
@@ -2706,7 +3008,7 @@ class HikarungProApp {
       this.state.masterVol = Number(e.target.value);
       document.getElementById('labelMasterVol').textContent = `${this.state.masterVol}%`;
       this.updateMasterGainsSmooth(0.04);
-      this.saveAppState();
+      this.saveAppStateDebounced();
     });
 
     document.getElementById('selectMasterFadeSec').addEventListener('change', (e) => {
@@ -2755,9 +3057,15 @@ class HikarungProApp {
       const bank = this.getCurrentBank();
       const ok = await this.showConfirmDialog('バンク削除', `バンク「${bank.name}」を削除しますか？`);
       if (!ok) return;
+      for (const p of bank.pads) {
+        this.stopPadVoices(p.id, 0.04);
+      }
+      const curIdx = this.state.banks.findIndex((b) => b.id === bank.id);
       this.state.banks = this.state.banks.filter((b) => b.id !== bank.id);
-      this.state.currentBankId = this.state.banks[0].id;
-      this.saveAppState();
+      const nextIdx = Math.min(curIdx, this.state.banks.length - 1);
+      this.state.currentBankId = this.state.banks[nextIdx].id;
+      await this.saveAppState();
+      this.gcOrphanAudioFiles();
       this.renderBankTabs();
       this.renderPadGrid();
     });
@@ -2769,13 +3077,18 @@ class HikarungProApp {
       const files = Array.from(e.target.files || []);
       if (files.length === 0) return;
       const bank = this.getCurrentBank();
+      const visibleCount = this.getVisiblePadCount();
       let importedCount = 0;
       let xfadeAutoCount = 0;
+      let skippedCount = 0;
       const isBulk = files.length >= 3;
       for (let fIdx = 0; fIdx < files.length; fIdx++) {
         const file = files[fIdx];
-        const emptyPad = bank.pads.find((p) => !p.audioId);
-        if (!emptyPad) break;
+        const emptyPad = bank.pads.slice(0, visibleCount).find((p) => !p.audioId);
+        if (!emptyPad) {
+          skippedCount = files.length - fIdx;
+          break;
+        }
         try {
           if (isBulk) this.showToast(`読み込み中... (${fIdx + 1}/${files.length})`);
           const info = await this.importAudioFileToRecord(file, !isBulk);
@@ -2795,8 +3108,9 @@ class HikarungProApp {
       e.target.value = '';
       await this.saveAppState();
       this.renderPadGrid();
-      const xfadeSuffix = xfadeAutoCount > 0 ? `（うち30秒以上の${xfadeAutoCount}件をX-FADEに自動設定）` : '';
-      this.showToast(`${importedCount}件の音源を割り当てました${xfadeSuffix}`);
+      const xfadeSuffix = xfadeAutoCount > 0 ? `（うち30秒以上の${xfadeAutoCount}件をX-FADEに設定）` : '';
+      const skipSuffix = skippedCount > 0 ? ` ※空きパッド不足で${skippedCount}件スキップ` : '';
+      this.showToast(`${importedCount}件の音源を割り当てました${xfadeSuffix}${skipSuffix}`);
     });
 
     document.getElementById('selectPlaylist').addEventListener('change', (e) => {
@@ -2856,7 +3170,8 @@ class HikarungProApp {
         this.bgmPlayer.playingPlaylistId = this.state.currentPlaylistId;
         this.bgmPlayer.currentTrackIndex = 0;
       }
-      this.saveAppState();
+      await this.saveAppState();
+      this.gcOrphanAudioFiles();
       this.renderPlaylistSelector();
       this.renderBgmTrackList();
       this.updateBgmTransportUI();
@@ -2951,11 +3266,13 @@ class HikarungProApp {
     });
 
     seekSliderEl.addEventListener('change', (e) => {
+      if (!this.bgmPlayer.isSeeking) return;
       const ratio = Number(e.target.value) / 1000;
       this.bgmPlayer.isSeeking = false;
       this.seekBgmToRatio(ratio);
     });
     seekSliderEl.addEventListener('pointerup', commitBgmSeek);
+    seekSliderEl.addEventListener('pointercancel', commitBgmSeek);
     seekSliderEl.addEventListener('touchend', commitBgmSeek);
     seekSliderEl.addEventListener('mouseup', commitBgmSeek);
 
@@ -2970,7 +3287,7 @@ class HikarungProApp {
       this.state.bgmVol = Number(e.target.value);
       document.getElementById('labelBgmVol').textContent = `${this.state.bgmVol}%`;
       this.updateMasterGainsSmooth(0.05);
-      this.saveAppState();
+      this.saveAppStateDebounced();
     });
 
     document.getElementById('selectBgmMode').addEventListener('change', (e) => {
@@ -3074,7 +3391,8 @@ class HikarungProApp {
       if (!buf) return;
       const { startFrac, endFrac } = this.getWaveformViewWindow(buf.duration);
       const focusFrac = startFrac + mouseRatio * (endFrac - startFrac);
-      const factor = e.deltaY < 0 ? 1.5 : (1 / 1.5);
+      const clampedDelta = Math.max(-180, Math.min(180, e.deltaY));
+      const factor = Math.pow(1.003, -clampedDelta);
       this.setEditorZoom(this.editorZoom * factor, focusFrac);
     }, { passive: false });
 
@@ -3099,25 +3417,92 @@ class HikarungProApp {
       this.drawEditorWaveform();
     });
 
+    // Multi-touch pinch-to-zoom + handle proximity grab / pan on Waveform Canvas
+    const activeWfPointers = new Map();
+    let pinchStartDist = 0;
+    let pinchStartZoom = 1;
+    let panDragStartX = 0;
+    let panDragStartOffset = 0;
+
     wfCanvas.addEventListener('pointerdown', (e) => {
       if (!this.editorDraft || !this.editorDraft.audioId) return;
+      const buf = this.audioBuffers.get(this.editorDraft.audioId);
+      if (!buf) return;
+
+      activeWfPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      try { wfCanvas.setPointerCapture(e.pointerId); } catch (_) {}
+
+      // 2-finger pinch zoom start
+      if (activeWfPointers.size === 2) {
+        this.draggingTrimHandle = null;
+        const pts = Array.from(activeWfPointers.values());
+        pinchStartDist = Math.max(10, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
+        pinchStartZoom = this.editorZoom || 1;
+        return;
+      }
+
+      const rect = wfCanvas.getBoundingClientRect();
+      const { viewStart, viewDur } = this.getWaveformViewWindow(buf.duration);
+      const clickX = e.clientX - rect.left;
+      const startX = (((Number(this.editorDraft.trimStart) || 0) - viewStart) / viewDur) * rect.width;
+      const endX = (((Number(this.editorDraft.trimEnd) || buf.duration) - viewStart) / viewDur) * rect.width;
+      const distStartPx = Math.abs(clickX - startX);
+      const distEndPx = Math.abs(clickX - endX);
+
+      // When zoomed in, only grab handles within ±26px; dragging elsewhere pans the waveform
+      if (this.editorZoom > 1.05 && distStartPx > 26 && distEndPx > 26) {
+        this.draggingTrimHandle = 'pan';
+        panDragStartX = e.clientX;
+        panDragStartOffset = this.editorPanStart;
+        return;
+      }
+
+      this.draggingTrimHandle = distStartPx <= distEndPx ? 'start' : 'end';
       const t = getCanvasTime(e);
-      const distStart = Math.abs(t - (this.editorDraft.trimStart || 0));
-      const distEnd = Math.abs(t - (this.editorDraft.trimEnd || 0));
-      this.draggingTrimHandle = distStart <= distEnd ? 'start' : 'end';
-      wfCanvas.setPointerCapture(e.pointerId);
       if (this.draggingTrimHandle === 'start') syncTrimStart(t);
       else syncTrimEnd(t);
     });
 
     wfCanvas.addEventListener('pointermove', (e) => {
+      if (activeWfPointers.has(e.pointerId)) {
+        activeWfPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      }
+      // 2-finger pinch zoom update
+      if (activeWfPointers.size === 2 && pinchStartDist > 0) {
+        const pts = Array.from(activeWfPointers.values());
+        const dist = Math.max(10, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
+        const rect = wfCanvas.getBoundingClientRect();
+        const midRatio = Math.max(0, Math.min(1, ((pts[0].x + pts[1].x) / 2 - rect.left) / rect.width));
+        const buf = this.editorDraft && this.audioBuffers.get(this.editorDraft.audioId);
+        if (buf) {
+          const { startFrac, endFrac } = this.getWaveformViewWindow(buf.duration);
+          const focusFrac = startFrac + midRatio * (endFrac - startFrac);
+          this.setEditorZoom(pinchStartZoom * (dist / pinchStartDist), focusFrac);
+        }
+        return;
+      }
+
       if (!this.draggingTrimHandle) return;
+      if (this.draggingTrimHandle === 'pan') {
+        const rect = wfCanvas.getBoundingClientRect();
+        const dxFrac = (e.clientX - panDragStartX) / rect.width;
+        const spanFrac = 1 / Math.max(1, this.editorZoom);
+        const maxPan = Math.max(0, 1 - spanFrac);
+        this.editorPanStart = Math.max(0, Math.min(maxPan, panDragStartOffset - dxFrac * spanFrac));
+        this.updateWaveformZoomUI();
+        this.drawEditorWaveform();
+        return;
+      }
       const t = getCanvasTime(e);
       if (this.draggingTrimHandle === 'start') syncTrimStart(t);
       else syncTrimEnd(t);
     });
 
-    const endCanvasDrag = () => { this.draggingTrimHandle = null; };
+    const endCanvasDrag = (e) => {
+      if (e && e.pointerId !== undefined) activeWfPointers.delete(e.pointerId);
+      if (activeWfPointers.size < 2) pinchStartDist = 0;
+      if (activeWfPointers.size === 0) this.draggingTrimHandle = null;
+    };
     wfCanvas.addEventListener('pointerup', endCanvasDrag);
     wfCanvas.addEventListener('pointercancel', endCanvasDrag);
 
@@ -3170,8 +3555,13 @@ class HikarungProApp {
       this.stopEditorPreview();
       const idx = this.editorTarget.padIndex;
       const bank = this.getCurrentBank();
+      if (bank.pads[idx]) {
+        this.stopPadVoices(bank.pads[idx].id, 0.03);
+      }
       bank.pads[idx] = this.createDefaultPad(idx);
+      this.editorDraft = null;
       await this.saveAppState();
+      this.gcOrphanAudioFiles();
       document.getElementById('editorModal').classList.add('hidden');
       this.renderPadGrid();
       this.showToast(`PAD #${idx + 1} を空にしました`);
@@ -3208,26 +3598,52 @@ class HikarungProApp {
       location.reload();
     });
 
-    // ==================== EXTERNAL KEYBOARD SHORTCUTS (POSITION-BASED) ====================
+    // ==================== EXTERNAL KEYBOARD SHORTCUTS (POSITION-BASED & IME-SAFE) ====================
+    const resolveKeyChar = (e) => {
+      if (e.code) {
+        if (/^Key([A-Z])$/.test(e.code)) return e.code.slice(3);
+        if (/^Digit([0-9])$/.test(e.code)) return e.code.slice(5);
+      }
+      return String(e.key || '').toUpperCase();
+    };
+
     window.addEventListener('keydown', (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
-      if (!document.getElementById('editorModal').classList.contains('hidden')) return;
-      if (!document.getElementById('dialogModal').classList.contains('hidden')) return;
+
+      const dialogOpen = !document.getElementById('dialogModal').classList.contains('hidden');
+      const editorOpen = !document.getElementById('editorModal').classList.contains('hidden');
+      const menuOpen = !document.getElementById('menuModal').classList.contains('hidden');
 
       if (e.key === 'Escape') {
         e.preventDefault();
-        this.panicStopAll();
+        if (dialogOpen) {
+          document.getElementById('btnDialogCancel').click();
+        } else if (editorOpen) {
+          this.stopEditorPreview();
+          document.getElementById('editorModal').classList.add('hidden');
+        } else if (menuOpen) {
+          document.getElementById('menuModal').classList.add('hidden');
+        } else {
+          this.panicStopAll();
+        }
         return;
       }
 
+      if (dialogOpen || editorOpen || menuOpen) return;
       if (e.repeat) return;
-      const pressed = e.key.toUpperCase();
+
+      const pressed = resolveKeyChar(e);
       const bank = this.getCurrentBank();
       if (!bank) return;
       const count = this.getVisiblePadCount();
       for (let i = 0; i < count; i++) {
         if (this.getSlotKey(i) === pressed) {
           e.preventDefault();
+          const pad = bank.pads[i];
+          if (pad && pad.triggerMode === 'gate') {
+            this.gatePressedPads.add(pad.id);
+          }
           this.triggerPad(i);
           break;
         }
@@ -3235,21 +3651,24 @@ class HikarungProApp {
     });
 
     window.addEventListener('keyup', (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
-      const released = e.key.toUpperCase();
+      const released = resolveKeyChar(e);
       const bank = this.getCurrentBank();
       if (!bank) return;
       const count = this.getVisiblePadCount();
       for (let i = 0; i < count; i++) {
         const pad = bank.pads[i];
         if (pad && this.getSlotKey(i) === released && pad.triggerMode === 'gate') {
-          this.stopPadVoices(pad.id, Number(pad.fadeOut) || 0.15);
+          this.gatePressedPads.delete(pad.id);
+          const gateRel = Math.min(0.2, Math.max(0.02, safeNum(pad.fadeOut, 0.08)));
+          this.stopPadVoices(pad.id, gateRel);
         }
       }
     });
   }
 
-  // ==================== NON-BLOCKING CUSTOM DIALOGS (NEVER STOPS AUDIO) ====================
+  // ==================== NON-BLOCKING CUSTOM DIALOGS (NEVER STOPS AUDIO, IME-SAFE) ====================
   showPromptDialog(title, message, defaultValue = '') {
     return new Promise((resolve) => {
       const modal = document.getElementById('dialogModal');
@@ -3271,6 +3690,15 @@ class HikarungProApp {
       }, 30);
 
       const finish = (result) => {
+        if (result !== null) {
+          const trimmed = String(result).trim();
+          if (!trimmed) {
+            this.showToast('名前を入力してください');
+            inputEl.focus();
+            return;
+          }
+          result = trimmed;
+        }
         modal.classList.add('hidden');
         btnOk.onclick = null;
         btnCancel.onclick = null;
@@ -3283,6 +3711,7 @@ class HikarungProApp {
       btnCancel.onclick = () => finish(null);
       btnClose.onclick = () => finish(null);
       inputEl.onkeydown = (ev) => {
+        if (ev.isComposing || ev.keyCode === 229) return;
         if (ev.key === 'Enter') {
           ev.preventDefault();
           finish(inputEl.value);
@@ -3308,15 +3737,28 @@ class HikarungProApp {
       msgEl.textContent = message;
       inputEl.classList.add('hidden');
       modal.classList.remove('hidden');
+      setTimeout(() => btnOk.focus(), 30);
+
+      const onKey = (ev) => {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          finish(true);
+        } else if (ev.key === 'Escape') {
+          ev.preventDefault();
+          finish(false);
+        }
+      };
 
       const finish = (result) => {
         modal.classList.add('hidden');
         btnOk.onclick = null;
         btnCancel.onclick = null;
         btnClose.onclick = null;
+        window.removeEventListener('keydown', onKey, true);
         resolve(result);
       };
 
+      window.addEventListener('keydown', onKey, true);
       btnOk.onclick = () => finish(true);
       btnCancel.onclick = () => finish(false);
       btnClose.onclick = () => finish(false);

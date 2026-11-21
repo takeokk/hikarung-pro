@@ -10,7 +10,7 @@
   <title>HIKARUNG-PRO | 配信・イベント用ポン出し＆BGMデッキ</title>
   <link rel="manifest" href="./manifest.json">
   <link rel="icon" type="image/svg+xml" href="./icon.svg">
-  <link rel="apple-touch-icon" href="./icon.svg">
+  <link rel="apple-touch-icon" sizes="180x180" href="./icon-180.png">
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
@@ -397,15 +397,15 @@
       <div class="modal-header">
         <div class="modal-title-group">
           <h2 class="modal-title">💾 HIKARUNG-PRO 管理メニュー</h2>
-          <span id="menuVersionBadge" class="version-badge">v2.9.0</span>
+          <span id="menuVersionBadge" class="version-badge">v3.0.0</span>
         </div>
         <button id="btnCloseMenuModal" class="btn-close" type="button">✕</button>
       </div>
       <div class="modal-body menu-body">
-        <div class="menu-section">
+        <div id="menuUpdateSection" class="menu-section">
           <div class="menu-section-head">
             <h3>🔄 アプリ本体の更新（データ保持アップデート）</h3>
-            <span id="menuVersionDetail" class="version-detail">現在のバージョン: v2.9.0</span>
+            <span id="menuVersionDetail" class="version-detail">現在のバージョン: v3.0.0</span>
           </div>
           <p class="section-desc">通信可能な状態（GitHub / Tailscale / Wi-Fi接続時）で下のボタンを押すと、<strong>iPad内に登録した音源やパッド・プレイリストの設定を残したまま、アプリ本体（キャッシュ）だけを最新版に更新</strong>します。</p>
           <button id="btnUpdateAppCache" class="btn-primary-lg" type="button">🔄 アプリ本体を最新に更新して再読み込み</button>

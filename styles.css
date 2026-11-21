@@ -41,6 +41,11 @@ input, select, button {
   color: inherit;
 }
 
+input[type="text"], input[type="number"], textarea {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 /* ==================== APP SHELL LAYOUT ==================== */
 .app-shell {
   display: flex;
@@ -373,6 +378,7 @@ input, select, button {
 .pad-section {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   padding: 10px;
   display: flex;
   flex-direction: column;
@@ -380,17 +386,17 @@ input, select, button {
 
 .pad-grid {
   flex: 1;
+  min-height: 0;
   display: grid;
   gap: 10px;
   width: 100%;
-  height: 100%;
 }
 
-.pad-grid.grid-3x3 { grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(3, 1fr); }
-.pad-grid.grid-4x3 { grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(3, 1fr); }
-.pad-grid.grid-4x4 { grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(4, 1fr); }
-.pad-grid.grid-5x4 { grid-template-columns: repeat(5, 1fr); grid-template-rows: repeat(4, 1fr); }
-.pad-grid.grid-6x4 { grid-template-columns: repeat(6, 1fr); grid-template-rows: repeat(4, 1fr); }
+.pad-grid.grid-3x3 { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(0, 1fr)); }
+.pad-grid.grid-4x3 { grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(0, 1fr)); }
+.pad-grid.grid-4x4 { grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-rows: repeat(4, minmax(0, 1fr)); }
+.pad-grid.grid-5x4 { grid-template-columns: repeat(5, minmax(0, 1fr)); grid-template-rows: repeat(4, minmax(0, 1fr)); }
+.pad-grid.grid-6x4 { grid-template-columns: repeat(6, minmax(0, 1fr)); grid-template-rows: repeat(4, minmax(0, 1fr)); }
 
 /* ==================== SAMPLER PAD CARD ==================== */
 .sound-pad {
@@ -1426,7 +1432,7 @@ input, select, button {
   }
   .bgm-deck {
     width: 100%;
-    height: 270px;
+    height: clamp(300px, 44dvh, 440px);
     border-left: none;
     border-top: 1px solid var(--border-subtle);
   }
@@ -1439,6 +1445,39 @@ input, select, button {
   .trim-controls-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* ==================== LIVE MODE SAFETY LOCK ==================== */
+body:not(.edit-mode-active) .pad-gear-btn,
+body:not(.edit-mode-active) .bank-actions,
+body:not(.edit-mode-active) .bgm-deck-header .btn-icon-sm,
+body:not(.edit-mode-active) .bgm-track-actions,
+body:not(.edit-mode-active) .bgm-add-btns {
+  display: none !important;
+}
+
+.modal-card {
+  max-height: 94dvh;
+}
+
+.btn-track-act {
+  width: 30px;
+  height: 30px;
+}
+
+.btn-track-act.btn-trk-del {
+  margin-left: 5px;
+  border-color: rgba(244, 63, 94, 0.35);
+  color: #fb7185;
+}
+
+.pad-sub-btn {
+  padding: 5px 9px;
+}
+
+.bank-tab.has-playing {
+  border-color: var(--accent-emerald);
+  box-shadow: inset 0 -2px 0 var(--accent-emerald);
 }
 
 
