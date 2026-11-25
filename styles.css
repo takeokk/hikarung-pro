@@ -1597,3 +1597,30 @@ body:not(.edit-mode-active) .bgm-add-btns {
 .bgm-options-row {
   flex-wrap: wrap;
 }
+
+
+/* ==================== OUTPUT MODE SELECTOR (STEREO / MONO / 1-CABLE) ==================== */
+.vu-output-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.vu-mode-label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--text-sub);
+}
+
+.vu-mode-select {
+  font-size: 0.74rem;
+  padding: 4px 7px;
+  border-radius: 6px;
+}
+
+.vu-mode-select.mono-active {
+  border-color: var(--accent-amber);
+  color: #fde68a;
+  background: rgba(245, 158, 11, 0.16);
+}

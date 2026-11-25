@@ -115,6 +115,14 @@
           <div class="vu-canvas-wrap">
             <canvas id="vuMeterCanvas" width="760" height="44"></canvas>
           </div>
+          <div class="vu-output-mode">
+            <label for="selectOutputMode" class="vu-mode-label">出力方式</label>
+            <select id="selectOutputMode" class="pill-select-sm vu-mode-select" title="バランス入力へ1本挿しする際は「1本挿し回避(Lのみ)」を選ぶと位相打消しを防げます">
+              <option value="stereo" selected>🔊 ステレオ (通常)</option>
+              <option value="mono_both">🔈 モノラル (L+R両出し)</option>
+              <option value="mono_l_only">🔌 1本挿し回避 (Lのみ・R無音)</option>
+            </select>
+          </div>
         </div>
       </section>
 
@@ -397,7 +405,7 @@
       <div class="modal-header">
         <div class="modal-title-group">
           <h2 class="modal-title">💾 HIKARUNG-PRO 管理メニュー</h2>
-          <span id="menuVersionBadge" class="version-badge">v3.0.0</span>
+          <span id="menuVersionBadge" class="version-badge">v3.1.0</span>
         </div>
         <button id="btnCloseMenuModal" class="btn-close" type="button">✕</button>
       </div>
@@ -405,7 +413,7 @@
         <div id="menuUpdateSection" class="menu-section">
           <div class="menu-section-head">
             <h3>🔄 アプリ本体の更新（データ保持アップデート）</h3>
-            <span id="menuVersionDetail" class="version-detail">現在のバージョン: v3.0.0</span>
+            <span id="menuVersionDetail" class="version-detail">現在のバージョン: v3.1.0</span>
           </div>
           <p class="section-desc">通信可能な状態（GitHub / Tailscale / Wi-Fi接続時）で下のボタンを押すと、<strong>iPad内に登録した音源やパッド・プレイリストの設定を残したまま、アプリ本体（キャッシュ）だけを最新版に更新</strong>します。</p>
           <button id="btnUpdateAppCache" class="btn-primary-lg" type="button">🔄 アプリ本体を最新に更新して再読み込み</button>

@@ -3,7 +3,7 @@
  * Zero external dependencies. Web Audio API + IndexedDB + Service Worker.
  */
 
-const APP_VERSION = 'v3.0.0';
+const APP_VERSION = 'v3.1.0';
 
 function safeNum(val, fallback) {
   if (val === null || val === undefined || val === '') return fallback;
@@ -228,6 +228,7 @@ class HikarungProApp {
     this.offlineDecodeCtx = null;
     this.masterMixBus = null;
     this.masterLimiter = null;
+    this.outMatrix = null;
     this.masterSeGain = null;
     this.masterBgmGain = null;
     this.analyserL = null;
@@ -265,6 +266,7 @@ class HikarungProApp {
       bgmMode: 'all_loop',
       bgmXfade: 3.0,
       bgmMonoLink: 'off',
+      outputMode: 'stereo',
       slotKeys: {}
     };
 
@@ -400,9 +402,31 @@ class HikarungProApp {
       this.masterLimiter.release.value = 0.08;
 
       this.masterMixBus.connect(this.masterLimiter);
-      this.masterLimiter.connect(this.audioCtx.destination);
 
-      const splitter = this.audioCtx.createChannelSplitter(2);
+      // 2x2 Output Routing Matrix (Stereo / Mono L+R / 1-Cable Balanced Safe L-Only)
+      const outSplitter = this.audioCtx.createChannelSplitter(2);
+      const outMerger = this.audioCtx.createChannelMerger(2);
+      const matLL = this.audioCtx.createGain();
+      const matRL = this.audioCtx.createGain();
+      const matLR = this.audioCtx.createGain();
+      const matRR = this.audioCtx.createGain();
+
+      this.masterLimiter.connect(outSplitter);
+      outSplitter.connect(matLL, 0);
+      outSplitter.connect(matRL, 1);
+      outSplitter.connect(matLR, 0);
+      outSplitter.connect(matRR, 1);
+      matLL.connect(outMerger, 0, 0);
+      matRL.connect(outMerger, 0, 0);
+      matLR.connect(outMerger, 0, 1);
+      matRR.connect(outMerger, 0, 1);
+
+      this.outMatrix = { matLL, matRL, matLR, matRR };
+      this.applyOutputMode(0);
+
+      outMerger.connect(this.audioCtx.destination);
+
+      const vuSplitter = this.audioCtx.createChannelSplitter(2);
       this.analyserL = this.audioCtx.createAnalyser();
       this.analyserR = this.audioCtx.createAnalyser();
       this.analyserL.fftSize = 256;
@@ -412,9 +436,9 @@ class HikarungProApp {
       this.analyserBufL = new Float32Array(this.analyserL.fftSize);
       this.analyserBufR = new Float32Array(this.analyserR.fftSize);
 
-      this.masterLimiter.connect(splitter);
-      splitter.connect(this.analyserL, 0);
-      splitter.connect(this.analyserR, 1);
+      outMerger.connect(vuSplitter);
+      vuSplitter.connect(this.analyserL, 0);
+      vuSplitter.connect(this.analyserR, 1);
 
       this.masterSeGain = this.audioCtx.createGain();
       this.masterSeGain.gain.value = this.state.masterVol / 100;
@@ -597,6 +621,30 @@ class HikarungProApp {
 
     this.masterBgmGain.gain.cancelScheduledValues(now);
     this.masterBgmGain.gain.setTargetAtTime(this.getEffectiveBgmMasterGain(), now, rampSec);
+  }
+
+  applyOutputMode(rampSec = 0.02) {
+    if (!this.audioCtx || !this.outMatrix) return;
+    const mode = this.state.outputMode || 'stereo';
+    let ll = 1, rl = 0, lr = 0, rr = 1;
+    if (mode === 'mono_both') {
+      ll = 0.5; rl = 0.5; lr = 0.5; rr = 0.5;
+    } else if (mode === 'mono_l_only') {
+      // Sum L+R to mono on L channel only; R channel is 0 so balanced TRS (L - R = L_mono - 0) has zero phase cancellation
+      ll = 0.5; rl = 0.5; lr = 0; rr = 0;
+    }
+
+    const now = this.audioCtx.currentTime;
+    const { matLL, matRL, matLR, matRR } = this.outMatrix;
+    const pairs = [[matLL, ll], [matRL, rl], [matLR, lr], [matRR, rr]];
+    for (const [node, val] of pairs) {
+      node.gain.cancelScheduledValues(now);
+      if (rampSec > 0) {
+        node.gain.setTargetAtTime(val, now, rampSec);
+      } else {
+        node.gain.setValueAtTime(val, now);
+      }
+    }
   }
 
   // ==================== DATA INITIALIZATION & PERSISTENCE ====================
@@ -1846,6 +1894,13 @@ class HikarungProApp {
     document.getElementById('selectBgmXfade').value = String(this.state.bgmXfade);
     const monoSel = document.getElementById('selectBgmMonoLink');
     if (monoSel) monoSel.value = this.state.bgmMonoLink || 'off';
+
+    const outSel = document.getElementById('selectOutputMode');
+    if (outSel) {
+      const mode = this.state.outputMode || 'stereo';
+      outSel.value = mode;
+      outSel.classList.toggle('mono-active', mode !== 'stereo');
+    }
   }
 
   renderBankTabs() {
@@ -2938,9 +2993,11 @@ class HikarungProApp {
         bgmMode: 'all_loop',
         bgmXfade: 3.0,
         bgmMonoLink: 'off',
+        outputMode: 'stereo',
         slotKeys: {}
       }, payload.state);
 
+      this.applyOutputMode(0.02);
       await this.saveAppState();
       this.renderAll();
       document.getElementById('menuModal').classList.add('hidden');
@@ -3010,6 +3067,22 @@ class HikarungProApp {
       this.updateMasterGainsSmooth(0.04);
       this.saveAppStateDebounced();
     });
+
+    const outModeSel = document.getElementById('selectOutputMode');
+    if (outModeSel) {
+      outModeSel.addEventListener('change', (e) => {
+        this.state.outputMode = e.target.value;
+        outModeSel.classList.toggle('mono-active', this.state.outputMode !== 'stereo');
+        this.applyOutputMode(0.02);
+        this.saveAppState();
+        const labels = {
+          stereo: '🔊 ステレオ出力（通常）',
+          mono_both: '🔈 モノラル出力（L+R合成を両chへ出力）',
+          mono_l_only: '🔌 1本挿し回避モード（L+R合成をLのみ出力・R無音）'
+        };
+        this.showToast(labels[this.state.outputMode] || this.state.outputMode);
+      });
+    }
 
     document.getElementById('selectMasterFadeSec').addEventListener('change', (e) => {
       this.state.masterFadeSec = Number(e.target.value);
