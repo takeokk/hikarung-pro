@@ -77,6 +77,9 @@
       </div>
 
       <div class="topbar-right">
+        <button id="btnToggleLibrary" class="btn-tool btn-lib-toggle" type="button" title="メディアライブラリの表示/非表示">
+          📚 ライブラリ
+        </button>
         <button id="btnBatchImport" class="btn-tool" type="button" title="空きパッドへ複数の音源ファイルをまとめて読み込む">
           📂 一括追加
         </button>
@@ -102,7 +105,46 @@
 
     <!-- ==================== MAIN WORKSPACE ==================== -->
     <main class="workspace">
-      <!-- Left/Center: Sampler Pad Grid + Stereo VU Meter -->
+      <!-- Left: Media Library Panel (foobar2000-style collapsible column) -->
+      <aside id="mediaLibraryPanel" class="library-panel collapsed" aria-label="メディアライブラリ">
+        <div class="library-header">
+          <div class="library-title-row">
+            <span class="library-badge">LIBRARY</span>
+            <span id="librarySourceLabel" class="library-source-name">フォルダ未指定</span>
+          </div>
+          <div class="library-actions">
+            <button id="btnLibWatchFolder" class="btn-lib-action btn-lib-primary" type="button" title="フォルダを指定して中身を一覧表示・監視">📂 フォルダ指定</button>
+            <button id="btnLibAddFiles" class="btn-lib-action" type="button" title="音源ファイルをライブラリへ追加">＋ 追加</button>
+            <button id="btnLibRescan" class="btn-icon-sm hidden" type="button" title="フォルダを再スキャン">🔄</button>
+            <button id="btnLibClear" class="btn-icon-sm" type="button" title="ライブラリをクリア">🗑️</button>
+          </div>
+        </div>
+
+        <div id="libraryPermissionBanner" class="library-perm-banner hidden">
+          <button id="btnLibResumeWatch" class="btn-lib-resume" type="button">🔓 フォルダ監視を再開</button>
+        </div>
+
+        <div class="library-filters">
+          <input id="inputLibSearch" type="search" class="lib-search-input" placeholder="🔍 曲名・フォルダで絞り込み..." autocomplete="off">
+          <select id="selectLibFolder" class="lib-folder-select" title="フォルダで絞り込み">
+            <option value="">すべてのフォルダ</option>
+          </select>
+        </div>
+
+        <div id="libraryTrackList" class="library-tracklist">
+          <div class="library-empty">
+            <p>📂 フォルダ指定または「＋ 追加」で音源を読み込んでください</p>
+            <p class="library-empty-sub">項目をドラッグしてパッドやBGMリストへ直接ドロップできます</p>
+          </div>
+        </div>
+
+        <div class="library-footer">
+          <span id="libraryCountLabel">0件</span>
+          <span class="library-hint">ドラッグでパッド / BGMへ</span>
+        </div>
+      </aside>
+
+      <!-- Center: Sampler Pad Grid + Stereo VU Meter -->
       <section class="pad-section">
         <div id="padGrid" class="pad-grid grid-4x4"></div>
 
@@ -218,6 +260,8 @@
   <input id="inputSingleAudio" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" hidden>
   <input id="inputBatchAudio" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" multiple hidden>
   <input id="inputBgmAudio" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" multiple hidden>
+  <input id="inputLibFolder" type="file" webkitdirectory directory multiple hidden>
+  <input id="inputLibFiles" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" multiple hidden>
   <input id="inputRestoreBackup" type="file" accept=".json,application/json" hidden>
 
   <!-- ==================== WAVEFORM & PAD EDITOR MODAL ==================== -->
@@ -405,7 +449,7 @@
       <div class="modal-header">
         <div class="modal-title-group">
           <h2 class="modal-title">💾 HIKARUNG-PRO 管理メニュー</h2>
-          <span id="menuVersionBadge" class="version-badge">v3.2.0</span>
+          <span id="menuVersionBadge" class="version-badge">v3.3.0</span>
         </div>
         <button id="btnCloseMenuModal" class="btn-close" type="button">✕</button>
       </div>
@@ -413,7 +457,7 @@
         <div id="menuUpdateSection" class="menu-section">
           <div class="menu-section-head">
             <h3>🔄 アプリ本体の更新</h3>
-            <span id="menuVersionDetail" class="version-detail">現在のバージョン: v3.2.0</span>
+            <span id="menuVersionDetail" class="version-detail">現在のバージョン: v3.3.0</span>
           </div>
           <p class="section-desc">インターネット接続時に下のボタンを押すと、<strong>端末内に登録した音源・パッド・プレイリストの設定を残したまま、アプリ本体だけを最新版に更新</strong>します。</p>
           <button id="btnUpdateAppCache" class="btn-primary-lg" type="button">🔄 アプリ本体を最新に更新して再読み込み</button>
@@ -427,6 +471,7 @@
             <li><strong>波形トリミング＆自動補正:</strong> 編集画面では2本指ピンチやボタンで最大32倍ズームに対応。無音自動カット・音量均一化・最大300%増幅・速度/ピッチ調整をその場で試聴できます。</li>
             <li><strong>セットリスト＆キーボード:</strong> 上部タブで進行順にバンクを切替（切替中も前の音は継続）。物理キーボードはパッド位置に固定割当され、<code>Esc</code> キーでモーダルを閉じるか <code>PANIC!</code> で全音を即時停止できます。</li>
             <li><strong>BGMデッキ＆TALK OVER:</strong> 独立プレイヤーで連続再生・曲間クロスフェード・0.1秒単位のシークに対応。<code>TALK OVER</code> でMC中のBGMをなめらかに減衰、<code>MONO連動</code> でMONOパッドとの音被りを自動回避できます。</li>
+            <li><strong>メディアライブラリ:</strong> 上部の <code>📚 ライブラリ</code> で左カラムを開閉。PCではフォルダ指定で自動監視、iPadでは音源プールとして一覧＆検索し、パッドやBGMリストへ直接ドラッグ＆ドロップできます。</li>
             <li><strong>VUメーター＆出力切替:</strong> 下部VUメーターで実出力とクリップを常時監視。ミキサーのバランスモノラル入力へ1本挿しする現場では、右側の出力を <strong><code>Lのみ出力 / R無音</code></strong> にすると位相打消しを防げます。</li>
             <li><strong>オフライン＆裏画面再生:</strong> ホーム画面に追加すればネット無しでも単体動作し、別アプリ切替や画面ロック中も再生を継続します（無音待機時は自動省電力）。</li>
           </ul>
