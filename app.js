@@ -3,7 +3,7 @@
  * Zero external dependencies. Web Audio API + IndexedDB + Service Worker.
  */
 
-const APP_VERSION = 'v3.3.0';
+const APP_VERSION = 'v3.3.1';
 
 function safeNum(val, fallback) {
   if (val === null || val === undefined || val === '') return fallback;
@@ -4215,16 +4215,22 @@ class HikarungProApp {
 
     const isGrip = Boolean(e.target.closest('.lib-drag-grip'));
     const isMouse = e.pointerType === 'mouse';
+
+    // On touch devices (iPad), only start drag from the left grip handle so the row body scrolls cleanly
+    if (!isMouse && !isGrip) return;
+
+    if (isGrip && !isMouse) {
+      e.preventDefault();
+    }
+
     const startX = e.clientX;
     const startY = e.clientY;
     let dragActive = false;
-    let cancelled = false;
     let ghostEl = null;
     let lastDropEl = null;
-    let holdTimer = null;
 
     const activateDrag = (cx, cy) => {
-      if (dragActive || cancelled) return;
+      if (dragActive) return;
       dragActive = true;
       rowEl.classList.add('dragging-source');
       ghostEl = document.createElement('div');
@@ -4253,33 +4259,12 @@ class HikarungProApp {
       return null;
     };
 
-    if (!isMouse && !isGrip) {
-      holdTimer = setTimeout(() => activateDrag(startX, startY), 220);
-    }
-
     const onMove = (ev) => {
-      if (cancelled) return;
       const dx = ev.clientX - startX;
       const dy = ev.clientY - startY;
 
-      if (!dragActive) {
-        if (isMouse || isGrip) {
-          if (Math.hypot(dx, dy) > 6) {
-            activateDrag(ev.clientX, ev.clientY);
-          }
-        } else {
-          // Touch on row body: horizontal swipe starts drag, vertical swipe scrolls list
-          if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) {
-            cancelled = true;
-            if (holdTimer) clearTimeout(holdTimer);
-            cleanup();
-            return;
-          }
-          if (Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy)) {
-            if (holdTimer) clearTimeout(holdTimer);
-            activateDrag(ev.clientX, ev.clientY);
-          }
-        }
+      if (!dragActive && Math.hypot(dx, dy) > 5) {
+        activateDrag(ev.clientX, ev.clientY);
       }
 
       if (dragActive && ghostEl) {
@@ -4299,7 +4284,6 @@ class HikarungProApp {
     };
 
     const cleanup = () => {
-      if (holdTimer) clearTimeout(holdTimer);
       window.removeEventListener('pointermove', onMove, { passive: false });
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onCancel);

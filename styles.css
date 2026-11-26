@@ -1809,11 +1809,14 @@ body:not(.edit-mode-active) .bgm-add-btns {
 }
 
 .lib-drag-grip {
-  color: var(--text-muted);
-  font-size: 0.82rem;
+  color: var(--text-sub);
+  font-size: 0.9rem;
   font-weight: 900;
   line-height: 1;
-  padding: 4px 3px;
+  padding: 8px 6px;
+  margin: -4px 0 -4px -3px;
+  border-radius: 5px;
+  background: rgba(148, 163, 184, 0.08);
   cursor: grab;
   touch-action: none;
   flex-shrink: 0;
