@@ -1912,3 +1912,41 @@ body:not(.edit-mode-active) .bgm-add-btns {
     border-bottom: 1px solid var(--border-subtle);
   }
 }
+
+
+/* Media Library Sample Preview Button (EDIT mode only) */
+.btn-lib-preview {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  background: rgba(56, 189, 248, 0.14);
+  color: #7dd3fc;
+  font-size: 0.7rem;
+  font-weight: 900;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s ease, transform 0.08s ease;
+}
+
+.btn-lib-preview:active {
+  transform: scale(0.92);
+}
+
+.lib-item.previewing {
+  border-color: var(--accent-cyan);
+  background: rgba(6, 182, 212, 0.16);
+}
+
+.lib-item.previewing .btn-lib-preview {
+  background: rgba(244, 63, 94, 0.25);
+  border-color: var(--accent-rose);
+  color: #fda4af;
+}
+
+body:not(.edit-mode-active) .btn-lib-preview {
+  display: none !important;
+}

@@ -449,7 +449,7 @@
       <div class="modal-header">
         <div class="modal-title-group">
           <h2 class="modal-title">💾 HIKARUNG-PRO 管理メニュー</h2>
-          <span id="menuVersionBadge" class="version-badge">v3.3.1</span>
+          <span id="menuVersionBadge" class="version-badge">v3.4.0</span>
         </div>
         <button id="btnCloseMenuModal" class="btn-close" type="button">✕</button>
       </div>
@@ -457,7 +457,7 @@
         <div id="menuUpdateSection" class="menu-section">
           <div class="menu-section-head">
             <h3>🔄 アプリ本体の更新</h3>
-            <span id="menuVersionDetail" class="version-detail">現在のバージョン: v3.3.1</span>
+            <span id="menuVersionDetail" class="version-detail">現在のバージョン: v3.4.0</span>
           </div>
           <p class="section-desc">インターネット接続時に下のボタンを押すと、<strong>端末内に登録した音源・パッド・プレイリストの設定を残したまま、アプリ本体だけを最新版に更新</strong>します。</p>
           <button id="btnUpdateAppCache" class="btn-primary-lg" type="button">🔄 アプリ本体を最新に更新して再読み込み</button>
@@ -471,7 +471,8 @@
             <li><strong>波形トリミング＆自動補正:</strong> 編集画面では2本指ピンチやボタンで最大32倍ズームに対応。無音自動カット・音量均一化・最大300%増幅・速度/ピッチ調整をその場で試聴できます。</li>
             <li><strong>セットリスト＆キーボード:</strong> 上部タブで進行順にバンクを切替（切替中も前の音は継続）。物理キーボードはパッド位置に固定割当され、<code>Esc</code> キーでモーダルを閉じるか <code>PANIC!</code> で全音を即時停止できます。</li>
             <li><strong>BGMデッキ＆TALK OVER:</strong> 独立プレイヤーで連続再生・曲間クロスフェード・0.1秒単位のシークに対応。<code>TALK OVER</code> でMC中のBGMをなめらかに減衰、<code>MONO連動</code> でMONOパッドとの音被りを自動回避できます。</li>
-            <li><strong>メディアライブラリ:</strong> 上部の <code>📚 ライブラリ</code> で左カラムを開閉。PCではフォルダ指定で自動監視、iPadでは音源プールとして一覧＆検索し、パッドやBGMリストへ直接ドラッグ＆ドロップできます。</li>
+            <li><strong>メディアライブラリ:</strong> 上部の <code>📚 ライブラリ</code> で左カラムを開閉。PCではフォルダ指定で自動監視、iPadでは音源プールとして一覧＆検索し、パッドやBGMリストへ直接ドラッグ＆ドロップできます（<code>編集 EDIT</code> 中は各行の <code>▶</code> でサンプル試聴も可能）。</li>
+            <li><strong>音源データの保存仕様:</strong> パッド・BGM・iPadライブラリへ取り込んだ音源は、<strong>アプリ内部（端末のIndexedDB）へコピー保存</strong>されます。元のファイルを移動・削除しても本番中に音切れせず、不要になったパッド/BGM音源は自動でゴミ回収されます。</li>
             <li><strong>VUメーター＆出力切替:</strong> 下部VUメーターで実出力とクリップを常時監視。ミキサーのバランスモノラル入力へ1本挿しする現場では、右側の出力を <strong><code>Lのみ出力 / R無音</code></strong> にすると位相打消しを防げます。</li>
             <li><strong>オフライン＆裏画面再生:</strong> ホーム画面に追加すればネット無しでも単体動作し、別アプリ切替や画面ロック中も再生を継続します（無音待機時は自動省電力）。</li>
           </ul>

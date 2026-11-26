@@ -1926,6 +1926,44 @@ body:not(.edit-mode-active) .bgm-add-btns {
   }
 }
 
+
+/* Media Library Sample Preview Button (EDIT mode only) */
+.btn-lib-preview {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  background: rgba(56, 189, 248, 0.14);
+  color: #7dd3fc;
+  font-size: 0.7rem;
+  font-weight: 900;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s ease, transform 0.08s ease;
+}
+
+.btn-lib-preview:active {
+  transform: scale(0.92);
+}
+
+.lib-item.previewing {
+  border-color: var(--accent-cyan);
+  background: rgba(6, 182, 212, 0.16);
+}
+
+.lib-item.previewing .btn-lib-preview {
+  background: rgba(244, 63, 94, 0.25);
+  border-color: var(--accent-rose);
+  color: #fda4af;
+}
+
+body:not(.edit-mode-active) .btn-lib-preview {
+  display: none !important;
+}
+
 </style>
 </head>
 <body>
@@ -2364,7 +2402,7 @@ body:not(.edit-mode-active) .bgm-add-btns {
       <div class="modal-header">
         <div class="modal-title-group">
           <h2 class="modal-title">💾 HIKARUNG-PRO 管理メニュー</h2>
-          <span id="menuVersionBadge" class="version-badge">v3.3.1</span>
+          <span id="menuVersionBadge" class="version-badge">v3.4.0</span>
         </div>
         <button id="btnCloseMenuModal" class="btn-close" type="button">✕</button>
       </div>
@@ -2372,7 +2410,7 @@ body:not(.edit-mode-active) .bgm-add-btns {
         <div id="menuUpdateSection" class="menu-section">
           <div class="menu-section-head">
             <h3>🔄 アプリ本体の更新</h3>
-            <span id="menuVersionDetail" class="version-detail">現在のバージョン: v3.3.1</span>
+            <span id="menuVersionDetail" class="version-detail">現在のバージョン: v3.4.0</span>
           </div>
           <p class="section-desc">インターネット接続時に下のボタンを押すと、<strong>端末内に登録した音源・パッド・プレイリストの設定を残したまま、アプリ本体だけを最新版に更新</strong>します。</p>
           <button id="btnUpdateAppCache" class="btn-primary-lg" type="button">🔄 アプリ本体を最新に更新して再読み込み</button>
@@ -2386,7 +2424,8 @@ body:not(.edit-mode-active) .bgm-add-btns {
             <li><strong>波形トリミング＆自動補正:</strong> 編集画面では2本指ピンチやボタンで最大32倍ズームに対応。無音自動カット・音量均一化・最大300%増幅・速度/ピッチ調整をその場で試聴できます。</li>
             <li><strong>セットリスト＆キーボード:</strong> 上部タブで進行順にバンクを切替（切替中も前の音は継続）。物理キーボードはパッド位置に固定割当され、<code>Esc</code> キーでモーダルを閉じるか <code>PANIC!</code> で全音を即時停止できます。</li>
             <li><strong>BGMデッキ＆TALK OVER:</strong> 独立プレイヤーで連続再生・曲間クロスフェード・0.1秒単位のシークに対応。<code>TALK OVER</code> でMC中のBGMをなめらかに減衰、<code>MONO連動</code> でMONOパッドとの音被りを自動回避できます。</li>
-            <li><strong>メディアライブラリ:</strong> 上部の <code>📚 ライブラリ</code> で左カラムを開閉。PCではフォルダ指定で自動監視、iPadでは音源プールとして一覧＆検索し、パッドやBGMリストへ直接ドラッグ＆ドロップできます。</li>
+            <li><strong>メディアライブラリ:</strong> 上部の <code>📚 ライブラリ</code> で左カラムを開閉。PCではフォルダ指定で自動監視、iPadでは音源プールとして一覧＆検索し、パッドやBGMリストへ直接ドラッグ＆ドロップできます（<code>編集 EDIT</code> 中は各行の <code>▶</code> でサンプル試聴も可能）。</li>
+            <li><strong>音源データの保存仕様:</strong> パッド・BGM・iPadライブラリへ取り込んだ音源は、<strong>アプリ内部（端末のIndexedDB）へコピー保存</strong>されます。元のファイルを移動・削除しても本番中に音切れせず、不要になったパッド/BGM音源は自動でゴミ回収されます。</li>
             <li><strong>VUメーター＆出力切替:</strong> 下部VUメーターで実出力とクリップを常時監視。ミキサーのバランスモノラル入力へ1本挿しする現場では、右側の出力を <strong><code>Lのみ出力 / R無音</code></strong> にすると位相打消しを防げます。</li>
             <li><strong>オフライン＆裏画面再生:</strong> ホーム画面に追加すればネット無しでも単体動作し、別アプリ切替や画面ロック中も再生を継続します（無音待機時は自動省電力）。</li>
           </ul>
@@ -2439,7 +2478,7 @@ window.__EMBEDDED_INITIAL_SAMPLES_B64__ = {"01_タイトル決定音_ジャン.w
  * Zero external dependencies. Web Audio API + IndexedDB + Service Worker.
  */
 
-const APP_VERSION = 'v3.3.1';
+const APP_VERSION = 'v3.4.0';
 
 function safeNum(val, fallback) {
   if (val === null || val === undefined || val === '') return fallback;
@@ -2800,7 +2839,11 @@ class HikarungProApp {
       watchTimer: null,
       lastSignature: '',
       isScanning: false,
-      isOpen: false
+      isOpen: false,
+      previewAudio: null,
+      previewUrl: null,
+      previewItemId: null,
+      previewSeq: 0
     };
     this.libDrag = null;
   }
@@ -3726,6 +3769,7 @@ class HikarungProApp {
     }
     this.stopBgmImmediately();
     this.stopEditorPreview();
+    this.stopLibraryPreview();
     this.showToast('🛑 すべての音声を即時停止しました');
   }
 
@@ -5528,6 +5572,7 @@ class HikarungProApp {
 
     document.getElementById('btnModeLive').addEventListener('click', () => {
       this.isEditMode = false;
+      this.stopLibraryPreview();
       this.renderTopBarState();
       this.renderPadGrid();
       this.showToast('🟢 本番モード（タップで即発音）');
@@ -5608,6 +5653,7 @@ class HikarungProApp {
           this.startLibraryWatchLoop();
         } else {
           this.stopLibraryWatchLoop();
+          if (!this.mediaLibrary.isOpen) this.stopLibraryPreview();
         }
       });
     }
@@ -6548,6 +6594,7 @@ class HikarungProApp {
     if (!ok) return;
 
     this.stopLibraryWatchLoop();
+    this.stopLibraryPreview();
     await this.db.clearLibraryItems();
     this.mediaLibrary.dirHandle = null;
     this.mediaLibrary.dirName = '';
@@ -6629,8 +6676,10 @@ class HikarungProApp {
 
     const frag = document.createDocumentFragment();
     for (const item of filtered) {
+      const isPreviewing = this.mediaLibrary.previewItemId === item.id;
       const row = document.createElement('div');
-      row.className = 'lib-item';
+      row.className = `lib-item${isPreviewing ? ' previewing' : ''}`;
+      row.dataset.libId = item.id;
       row.title = item.relPath;
       row.innerHTML = `
         <span class="lib-drag-grip" aria-hidden="true">⋮⋮</span>
@@ -6639,14 +6688,91 @@ class HikarungProApp {
           ${item.folder ? `<div class="lib-item-folder">📁 ${this.escapeHtml(item.folder)}</div>` : ''}
         </div>
         <span class="lib-item-ext">${this.escapeHtml(item.ext || 'AUD')}</span>
+        <button type="button" class="btn-lib-preview" title="サンプル試聴 (編集モード専用)">${isPreviewing ? '⏹' : '▶'}</button>
       `;
+      const prevBtn = row.querySelector('.btn-lib-preview');
+      if (prevBtn) {
+        prevBtn.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          this.toggleLibraryPreview(item);
+        });
+      }
       row.addEventListener('pointerdown', (e) => this.handleLibraryItemPointerDown(e, item, row));
       frag.appendChild(row);
     }
     listEl.appendChild(frag);
   }
 
+  updateLibraryPreviewUI() {
+    const listEl = document.getElementById('libraryTrackList');
+    if (!listEl) return;
+    const activeId = this.mediaLibrary.previewItemId;
+    listEl.querySelectorAll('.lib-item').forEach((row) => {
+      const isMatch = Boolean(activeId && row.dataset.libId === activeId);
+      row.classList.toggle('previewing', isMatch);
+      const btn = row.querySelector('.btn-lib-preview');
+      if (btn) btn.textContent = isMatch ? '⏹' : '▶';
+    });
+  }
+
+  stopLibraryPreview() {
+    this.mediaLibrary.previewSeq++;
+    if (this.mediaLibrary.previewAudio) {
+      try {
+        this.mediaLibrary.previewAudio.pause();
+        this.mediaLibrary.previewAudio.src = '';
+      } catch (_) { }
+      this.mediaLibrary.previewAudio = null;
+    }
+    if (this.mediaLibrary.previewUrl) {
+      try { URL.revokeObjectURL(this.mediaLibrary.previewUrl); } catch (_) { }
+      this.mediaLibrary.previewUrl = null;
+    }
+    if (this.mediaLibrary.previewItemId !== null) {
+      this.mediaLibrary.previewItemId = null;
+      this.updateLibraryPreviewUI();
+    }
+  }
+
+  async toggleLibraryPreview(item) {
+    if (!this.isEditMode) return;
+    if (this.mediaLibrary.previewItemId === item.id) {
+      this.stopLibraryPreview();
+      return;
+    }
+    this.stopLibraryPreview();
+    const mySeq = ++this.mediaLibrary.previewSeq;
+    try {
+      const file = await this.getFileFromLibraryItem(item);
+      if (mySeq !== this.mediaLibrary.previewSeq || !this.isEditMode) return;
+      const url = URL.createObjectURL(file);
+      const audio = new Audio(url);
+      audio.volume = Math.max(0, Math.min(1, (this.state.masterVol || 100) / 100));
+      this.mediaLibrary.previewAudio = audio;
+      this.mediaLibrary.previewUrl = url;
+      this.mediaLibrary.previewItemId = item.id;
+      this.updateLibraryPreviewUI();
+
+      audio.onended = () => {
+        if (mySeq === this.mediaLibrary.previewSeq) this.stopLibraryPreview();
+      };
+      audio.onerror = () => {
+        if (mySeq === this.mediaLibrary.previewSeq) {
+          this.stopLibraryPreview();
+          this.showToast(`「${item.name}」の試聴に失敗しました`);
+        }
+      };
+      await audio.play();
+    } catch (err) {
+      if (mySeq === this.mediaLibrary.previewSeq) {
+        this.stopLibraryPreview();
+        this.showToast(`試聴エラー: ${err.message}`);
+      }
+    }
+  }
+
   handleLibraryItemPointerDown(e, item, rowEl) {
+    if (e.target.closest('.btn-lib-preview')) return;
     if (e.button !== 0 && e.pointerType === 'mouse') return;
 
     const isGrip = Boolean(e.target.closest('.lib-drag-grip'));

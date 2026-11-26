@@ -3,7 +3,7 @@
  * Zero external dependencies. Web Audio API + IndexedDB + Service Worker.
  */
 
-const APP_VERSION = 'v3.3.1';
+const APP_VERSION = 'v3.4.0';
 
 function safeNum(val, fallback) {
   if (val === null || val === undefined || val === '') return fallback;
@@ -364,7 +364,11 @@ class HikarungProApp {
       watchTimer: null,
       lastSignature: '',
       isScanning: false,
-      isOpen: false
+      isOpen: false,
+      previewAudio: null,
+      previewUrl: null,
+      previewItemId: null,
+      previewSeq: 0
     };
     this.libDrag = null;
   }
@@ -1290,6 +1294,7 @@ class HikarungProApp {
     }
     this.stopBgmImmediately();
     this.stopEditorPreview();
+    this.stopLibraryPreview();
     this.showToast('🛑 すべての音声を即時停止しました');
   }
 
@@ -3092,6 +3097,7 @@ class HikarungProApp {
 
     document.getElementById('btnModeLive').addEventListener('click', () => {
       this.isEditMode = false;
+      this.stopLibraryPreview();
       this.renderTopBarState();
       this.renderPadGrid();
       this.showToast('🟢 本番モード（タップで即発音）');
@@ -3172,6 +3178,7 @@ class HikarungProApp {
           this.startLibraryWatchLoop();
         } else {
           this.stopLibraryWatchLoop();
+          if (!this.mediaLibrary.isOpen) this.stopLibraryPreview();
         }
       });
     }
@@ -4112,6 +4119,7 @@ class HikarungProApp {
     if (!ok) return;
 
     this.stopLibraryWatchLoop();
+    this.stopLibraryPreview();
     await this.db.clearLibraryItems();
     this.mediaLibrary.dirHandle = null;
     this.mediaLibrary.dirName = '';
@@ -4193,8 +4201,10 @@ class HikarungProApp {
 
     const frag = document.createDocumentFragment();
     for (const item of filtered) {
+      const isPreviewing = this.mediaLibrary.previewItemId === item.id;
       const row = document.createElement('div');
-      row.className = 'lib-item';
+      row.className = `lib-item${isPreviewing ? ' previewing' : ''}`;
+      row.dataset.libId = item.id;
       row.title = item.relPath;
       row.innerHTML = `
         <span class="lib-drag-grip" aria-hidden="true">⋮⋮</span>
@@ -4203,14 +4213,91 @@ class HikarungProApp {
           ${item.folder ? `<div class="lib-item-folder">📁 ${this.escapeHtml(item.folder)}</div>` : ''}
         </div>
         <span class="lib-item-ext">${this.escapeHtml(item.ext || 'AUD')}</span>
+        <button type="button" class="btn-lib-preview" title="サンプル試聴 (編集モード専用)">${isPreviewing ? '⏹' : '▶'}</button>
       `;
+      const prevBtn = row.querySelector('.btn-lib-preview');
+      if (prevBtn) {
+        prevBtn.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          this.toggleLibraryPreview(item);
+        });
+      }
       row.addEventListener('pointerdown', (e) => this.handleLibraryItemPointerDown(e, item, row));
       frag.appendChild(row);
     }
     listEl.appendChild(frag);
   }
 
+  updateLibraryPreviewUI() {
+    const listEl = document.getElementById('libraryTrackList');
+    if (!listEl) return;
+    const activeId = this.mediaLibrary.previewItemId;
+    listEl.querySelectorAll('.lib-item').forEach((row) => {
+      const isMatch = Boolean(activeId && row.dataset.libId === activeId);
+      row.classList.toggle('previewing', isMatch);
+      const btn = row.querySelector('.btn-lib-preview');
+      if (btn) btn.textContent = isMatch ? '⏹' : '▶';
+    });
+  }
+
+  stopLibraryPreview() {
+    this.mediaLibrary.previewSeq++;
+    if (this.mediaLibrary.previewAudio) {
+      try {
+        this.mediaLibrary.previewAudio.pause();
+        this.mediaLibrary.previewAudio.src = '';
+      } catch (_) { }
+      this.mediaLibrary.previewAudio = null;
+    }
+    if (this.mediaLibrary.previewUrl) {
+      try { URL.revokeObjectURL(this.mediaLibrary.previewUrl); } catch (_) { }
+      this.mediaLibrary.previewUrl = null;
+    }
+    if (this.mediaLibrary.previewItemId !== null) {
+      this.mediaLibrary.previewItemId = null;
+      this.updateLibraryPreviewUI();
+    }
+  }
+
+  async toggleLibraryPreview(item) {
+    if (!this.isEditMode) return;
+    if (this.mediaLibrary.previewItemId === item.id) {
+      this.stopLibraryPreview();
+      return;
+    }
+    this.stopLibraryPreview();
+    const mySeq = ++this.mediaLibrary.previewSeq;
+    try {
+      const file = await this.getFileFromLibraryItem(item);
+      if (mySeq !== this.mediaLibrary.previewSeq || !this.isEditMode) return;
+      const url = URL.createObjectURL(file);
+      const audio = new Audio(url);
+      audio.volume = Math.max(0, Math.min(1, (this.state.masterVol || 100) / 100));
+      this.mediaLibrary.previewAudio = audio;
+      this.mediaLibrary.previewUrl = url;
+      this.mediaLibrary.previewItemId = item.id;
+      this.updateLibraryPreviewUI();
+
+      audio.onended = () => {
+        if (mySeq === this.mediaLibrary.previewSeq) this.stopLibraryPreview();
+      };
+      audio.onerror = () => {
+        if (mySeq === this.mediaLibrary.previewSeq) {
+          this.stopLibraryPreview();
+          this.showToast(`「${item.name}」の試聴に失敗しました`);
+        }
+      };
+      await audio.play();
+    } catch (err) {
+      if (mySeq === this.mediaLibrary.previewSeq) {
+        this.stopLibraryPreview();
+        this.showToast(`試聴エラー: ${err.message}`);
+      }
+    }
+  }
+
   handleLibraryItemPointerDown(e, item, rowEl) {
+    if (e.target.closest('.btn-lib-preview')) return;
     if (e.button !== 0 && e.pointerType === 'mouse') return;
 
     const isGrip = Boolean(e.target.closest('.lib-drag-grip'));
