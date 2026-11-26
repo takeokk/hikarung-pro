@@ -3,7 +3,7 @@
  * Zero external dependencies. Web Audio API + IndexedDB + Service Worker.
  */
 
-const APP_VERSION = 'v3.1.0';
+const APP_VERSION = 'v3.2.0';
 
 function safeNum(val, fallback) {
   if (val === null || val === undefined || val === '') return fallback;
@@ -3076,9 +3076,9 @@ class HikarungProApp {
         this.applyOutputMode(0.02);
         this.saveAppState();
         const labels = {
-          stereo: '🔊 ステレオ出力（通常）',
-          mono_both: '🔈 モノラル出力（L+R合成を両chへ出力）',
-          mono_l_only: '🔌 1本挿し回避モード（L+R合成をLのみ出力・R無音）'
+          stereo: '🔊 ステレオ出力',
+          mono_both: '🔈 モノラル L+R 出力',
+          mono_l_only: '🔌 Lのみ出力 / R無音（バランス1本挿し対応）'
         };
         this.showToast(labels[this.state.outputMode] || this.state.outputMode);
       });
