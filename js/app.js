@@ -1,267 +1,7 @@
 /**
- * HIKARUNG-PRO - Offline-First iPad Sound Cue & BGM Playlist Deck
- * Zero external dependencies. Web Audio API + IndexedDB + Service Worker.
+ * HIKARUNG-PRO v4.0.0 - Core Application, Audio Engine, Pads, BGM Deck & Waveform Editor
+ * Depends on: js/constants.js, js/db.js, js/media-library.js
  */
-
-const APP_VERSION = 'v3.4.0';
-
-function safeNum(val, fallback) {
-  if (val === null || val === undefined || val === '') return fallback;
-  const n = Number(val);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-const PAD_COLORS = [
-  { id: 'cyan', hex: '#06b6d4', label: 'シアン' },
-  { id: 'emerald', hex: '#10b981', label: 'エメラルド' },
-  { id: 'amber', hex: '#f59e0b', label: 'アンバー' },
-  { id: 'rose', hex: '#f43f5e', label: 'ローズ' },
-  { id: 'purple', hex: '#8b5cf6', label: 'パープル' },
-  { id: 'blue', hex: '#3b82f6', label: 'ブルー' },
-  { id: 'pink', hex: '#ec4899', label: 'ピンク' },
-  { id: 'slate', hex: '#94a3b8', label: 'スレート' }
-];
-
-const KEYBOARD_ROWS = [
-  ['1', '2', '3', '4', '5', '6'],
-  ['Q', 'W', 'E', 'R', 'T', 'Y'],
-  ['A', 'S', 'D', 'F', 'G', 'H'],
-  ['Z', 'X', 'C', 'V', 'B', 'N']
-];
-
-const DEFAULT_KEYS = [
-  '1', '2', '3', '4', '5', '6',
-  'Q', 'W', 'E', 'R', 'T', 'Y',
-  'A', 'S', 'D', 'F', 'G', 'H',
-  'Z', 'X', 'C', 'V', 'B', 'N'
-];
-
-const MODE_LABELS = {
-  poly: 'POLY',
-  retrig: 'RETRIG',
-  mono: 'MONO',
-  xfade: 'X-FADE',
-  gate: 'GATE'
-};
-
-const INITIAL_SAMPLES = [
-  {
-    id: 'aud_init_jan',
-    name: '🎉 タイトル・決定音 (ジャン！)',
-    file: '01_タイトル決定音_ジャン.wav',
-    url: './samples/01_タイトル決定音_ジャン.wav',
-    mimeType: 'audio/wav',
-    color: 'cyan',
-    triggerMode: 'poly',
-    loop: false,
-    fadeOut: 1.5,
-    addToBgm: false
-  },
-  {
-    id: 'aud_init_correct',
-    name: '⭕ クイズ正解 (ピンポン♪)',
-    file: '02_クイズ正解_ピンポン.wav',
-    url: './samples/02_クイズ正解_ピンポン.wav',
-    mimeType: 'audio/wav',
-    color: 'emerald',
-    triggerMode: 'poly',
-    loop: false,
-    fadeOut: 1.0,
-    addToBgm: false
-  },
-  {
-    id: 'aud_init_wrong',
-    name: '❌ クイズ不正解 (ブッブー)',
-    file: '03_クイズ不正解_ブッブー.wav',
-    url: './samples/03_クイズ不正解_ブッブー.wav',
-    mimeType: 'audio/wav',
-    color: 'rose',
-    triggerMode: 'poly',
-    loop: false,
-    fadeOut: 1.0,
-    addToBgm: false
-  },
-  {
-    id: 'aud_initial_yoshi',
-    name: '懸命にふんばりジャンプをするも足場に届かなかったヨッシーのモノマネ',
-    file: '懸命にふんばりジャンプをするも足場に届かなかったヨッシーのモノマネ.mp3',
-    url: './samples/懸命にふんばりジャンプをするも足場に届かなかったヨッシーのモノマネ.mp3',
-    mimeType: 'audio/mpeg',
-    color: 'emerald',
-    triggerMode: 'poly',
-    loop: false,
-    fadeOut: 2.0,
-    addToBgm: false
-  },
-  {
-    id: 'aud_init_bgm_talk',
-    name: '🎵 トークBGM (Chill Loop)',
-    file: '07_トークBGM_ChillLoop.wav',
-    url: './samples/07_トークBGM_ChillLoop.wav',
-    mimeType: 'audio/wav',
-    color: 'blue',
-    triggerMode: 'xfade',
-    loop: true,
-    fadeOut: 3.0,
-    addToBgm: true
-  },
-  {
-    id: 'aud_init_bgm_upbeat',
-    name: '🎵 オープニングBGM (Upbeat)',
-    file: '08_オープニングBGM_Upbeat.wav',
-    url: './samples/08_オープニングBGM_Upbeat.wav',
-    mimeType: 'audio/wav',
-    color: 'amber',
-    triggerMode: 'xfade',
-    loop: true,
-    fadeOut: 3.0,
-    addToBgm: true
-  }
-];
-
-// ==================== INDEXEDDB STORAGE ====================
-class HikarungDB {
-  constructor() {
-    this.dbName = 'KlangPadProDB'; // Keep same DB name so user settings persist
-    this.version = 2;
-    this.db = null;
-  }
-
-  async init() {
-    if (this.db) return this.db;
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open(this.dbName, this.version);
-      req.onupgradeneeded = (e) => {
-        const db = e.target.result;
-        if (!db.objectStoreNames.contains('audioFiles')) {
-          db.createObjectStore('audioFiles', { keyPath: 'id' });
-        }
-        if (!db.objectStoreNames.contains('appState')) {
-          db.createObjectStore('appState', { keyPath: 'id' });
-        }
-        if (!db.objectStoreNames.contains('mediaLibrary')) {
-          db.createObjectStore('mediaLibrary', { keyPath: 'id' });
-        }
-      };
-      req.onsuccess = (e) => {
-        this.db = e.target.result;
-        resolve(this.db);
-      };
-      req.onerror = (e) => reject(e.target.error);
-    });
-  }
-
-  async saveAudioFile(record) {
-    await this.init();
-    return new Promise((resolve, reject) => {
-      const tx = this.db.transaction('audioFiles', 'readwrite');
-      tx.objectStore('audioFiles').put(record);
-      tx.oncomplete = () => resolve();
-      tx.onerror = (e) => reject(e.target.error);
-    });
-  }
-
-  async getAudioFile(id) {
-    await this.init();
-    return new Promise((resolve, reject) => {
-      const tx = this.db.transaction('audioFiles', 'readonly');
-      const req = tx.objectStore('audioFiles').get(id);
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = (e) => reject(e.target.error);
-    });
-  }
-
-  async getAllAudioFiles() {
-    await this.init();
-    return new Promise((resolve, reject) => {
-      const tx = this.db.transaction('audioFiles', 'readonly');
-      const req = tx.objectStore('audioFiles').getAll();
-      req.onsuccess = () => resolve(req.result || []);
-      req.onerror = (e) => reject(e.target.error);
-    });
-  }
-
-  async deleteAudioFile(id) {
-    await this.init();
-    return new Promise((resolve, reject) => {
-      const tx = this.db.transaction('audioFiles', 'readwrite');
-      tx.objectStore('audioFiles').delete(id);
-      tx.oncomplete = () => resolve();
-      tx.onerror = (e) => reject(e.target.error);
-    });
-  }
-
-  async saveState(stateData) {
-    await this.init();
-    return new Promise((resolve, reject) => {
-      const tx = this.db.transaction('appState', 'readwrite');
-      tx.objectStore('appState').put({ id: 'main', stateData });
-      tx.oncomplete = () => resolve();
-      tx.onerror = (e) => reject(e.target.error);
-    });
-  }
-
-  async loadState() {
-    await this.init();
-    return new Promise((resolve, reject) => {
-      const tx = this.db.transaction('appState', 'readonly');
-      const req = tx.objectStore('appState').get('main');
-      req.onsuccess = () => resolve(req.result ? req.result.stateData : null);
-      req.onerror = (e) => reject(e.target.error);
-    });
-  }
-
-  async clearAll() {
-    await this.init();
-    return new Promise((resolve, reject) => {
-      const tx = this.db.transaction(['audioFiles', 'appState'], 'readwrite');
-      tx.objectStore('audioFiles').clear();
-      tx.objectStore('appState').clear();
-      tx.oncomplete = () => resolve();
-      tx.onerror = (e) => reject(e.target.error);
-    });
-  }
-
-  async saveLibraryItem(record) {
-    await this.init();
-    return new Promise((resolve, reject) => {
-      const tx = this.db.transaction('mediaLibrary', 'readwrite');
-      tx.objectStore('mediaLibrary').put(record);
-      tx.oncomplete = () => resolve();
-      tx.onerror = (e) => reject(e.target.error);
-    });
-  }
-
-  async getLibraryItem(id) {
-    await this.init();
-    return new Promise((resolve, reject) => {
-      const tx = this.db.transaction('mediaLibrary', 'readonly');
-      const req = tx.objectStore('mediaLibrary').get(id);
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = (e) => reject(e.target.error);
-    });
-  }
-
-  async getAllLibraryItems() {
-    await this.init();
-    return new Promise((resolve, reject) => {
-      const tx = this.db.transaction('mediaLibrary', 'readonly');
-      const req = tx.objectStore('mediaLibrary').getAll();
-      req.onsuccess = () => resolve(req.result || []);
-      req.onerror = (e) => reject(e.target.error);
-    });
-  }
-
-  async clearLibraryItems() {
-    await this.init();
-    return new Promise((resolve, reject) => {
-      const tx = this.db.transaction('mediaLibrary', 'readwrite');
-      tx.objectStore('mediaLibrary').clear();
-      tx.oncomplete = () => resolve();
-      tx.onerror = (e) => reject(e.target.error);
-    });
-  }
-}
 
 // ==================== MAIN APPLICATION ====================
 class HikarungProApp {
@@ -348,41 +88,27 @@ class HikarungProApp {
     // Waveform Editor Modal Runtime
     this.editorTarget = null;
     this.editorDraft = null;
+    this.editorOpenSeq = 0;
     this.previewVoice = null;
     this.draggingTrimHandle = null;
     this.editorZoom = 1;
     this.editorPanStart = 0; // 0..1 fraction of total duration
 
-    // Media Library (Left Collapsible Column: PC folder watch + iPad pool)
-    this.mediaLibrary = {
-      dirHandle: null,
-      dirName: '',
-      fsItems: [],
-      poolItems: [],
-      searchQuery: '',
-      folderFilter: '',
-      watchTimer: null,
-      lastSignature: '',
-      isScanning: false,
-      isOpen: false,
-      previewAudio: null,
-      previewUrl: null,
-      previewItemId: null,
-      previewSeq: 0
-    };
-    this.libDrag = null;
+    // Media Library Controller (Left Collapsible Column)
+    this.library = new MediaLibraryController(this);
   }
 
   async init() {
     this.registerServiceWorker();
     this.bindUIEvents();
+    this.library.bindEvents();
     await this.loadOrInitData();
-    this.initMediaLibrary();
+    this.library.init();
     this.startAnimationLoop();
   }
 
   registerServiceWorker() {
-    if ('serviceWorker' in navigator) {
+    if (!window.__IS_STANDALONE_HTML__ && 'serviceWorker' in navigator) {
       navigator.serviceWorker.register('./sw.js').catch(() => { });
     }
     const updateBadge = () => {
@@ -414,8 +140,11 @@ class HikarungProApp {
     try {
       const probe = await fetch('./sw.js', { cache: 'no-store' });
       if (!probe.ok) throw new Error('offline');
+      const swText = await probe.text();
+      // Guard against hotel/venue captive-portal Wi-Fi returning HTTP 200 HTML login pages
+      if (!swText.includes('CACHE_NAME')) throw new Error('captive-portal');
     } catch (_) {
-      this.showToast('⚠️ サーバーに接続できないため更新を中止しました（現在のアプリを維持します）');
+      this.showToast('⚠️ サーバーに正しく接続できないため更新を中止しました（現在のアプリを維持します）');
       return;
     }
 
@@ -741,31 +470,11 @@ class HikarungProApp {
   async loadOrInitData() {
     await this.db.init();
     const savedState = await this.db.loadState();
-    const savedAudioFiles = await this.db.getAllAudioFiles();
+    const savedAudioMeta = await this.db.getAllAudioMeta();
 
     if (savedState && savedState.banks && savedState.banks.length > 0) {
       this.state = Object.assign(this.state, savedState);
-
-      // Clean up any legacy auto-generated demo references (audio_demo_*)
-      let cleanedDemo = false;
-      for (const bank of this.state.banks) {
-        bank.pads.forEach((pad, idx) => {
-          if (pad.audioId && String(pad.audioId).startsWith('audio_demo_')) {
-            bank.pads[idx] = this.createDefaultPad(idx);
-            cleanedDemo = true;
-          }
-        });
-      }
-      for (const pl of this.state.playlists) {
-        const before = pl.tracks.length;
-        pl.tracks = pl.tracks.filter((t) => !t.audioId || !String(t.audioId).startsWith('audio_demo_'));
-        if (pl.tracks.length !== before) cleanedDemo = true;
-      }
-      if (cleanedDemo) {
-        await this.saveAppState();
-      }
     } else {
-      // Fresh empty setup (instant startup)
       this.state.banks = [
         this.createDefaultBank('bank_1', '1. オープニング・定番SE'),
         this.createDefaultBank('bank_2', '2. トーク・企画コーナー'),
@@ -781,41 +490,32 @@ class HikarungProApp {
       await this.saveAppState();
     }
 
-    // Render UI immediately without waiting for audio decoding
-    this.renderAll();
-
-    // Purge any legacy audio_demo_* files from IndexedDB and populate metadata immediately
-    const shortFilesToPreDecode = [];
-    for (const fileRec of savedAudioFiles) {
-      if (String(fileRec.id).startsWith('audio_demo_')) {
-        await this.db.deleteAudioFile(fileRec.id);
-      } else {
-        this.audioMeta.set(fileRec.id, {
-          name: fileRec.name,
-          duration: Number(fileRec.duration) || 0
-        });
-        // Only pre-decode short SE files (<30s) into RAM at startup to prevent iPadOS OOM crashes.
-        // Long BGM tracks (>=30s) are lazy-decoded on demand and LRU-cached (max 3 in RAM).
-        if (!fileRec.duration || fileRec.duration < 30) {
-          shortFilesToPreDecode.push(fileRec);
-        }
+    // Populate metadata immediately (0 binary bytes loaded on startup!)
+    const shortIdsToPreDecode = [];
+    for (const meta of savedAudioMeta) {
+      this.audioMeta.set(meta.id, {
+        name: meta.name,
+        duration: Number(meta.duration) || 0
+      });
+      if (!meta.duration || meta.duration < 30) {
+        shortIdsToPreDecode.push(meta.id);
       }
     }
 
-    // Re-render immediately so all track/pad durations from audioMeta appear right away
     this.renderAll();
 
-    if (shortFilesToPreDecode.length > 0) {
-      // Decode short files in small batches (4 at a time) to avoid memory spikes on iPad
-      for (let i = 0; i < shortFilesToPreDecode.length; i += 4) {
-        const batch = shortFilesToPreDecode.slice(i, i + 4);
-        await Promise.all(batch.map((rec) => this.decodeAndCacheAudioRecord(rec)));
+    if (shortIdsToPreDecode.length > 0) {
+      for (let i = 0; i < shortIdsToPreDecode.length; i += 4) {
+        const batchIds = shortIdsToPreDecode.slice(i, i + 4);
+        await Promise.all(batchIds.map(async (id) => {
+          const rec = await this.db.getAudioFile(id);
+          if (rec) await this.decodeAndCacheAudioRecord(rec);
+        }));
       }
       this.renderAll();
     }
 
-    // Load initial samples in background on first run (or if v2 pack not yet loaded)
-    if (!this.state.initialSamplesV2Loaded) {
+    if (!this.state.initialSamplesLoaded) {
       this.loadInitialSamplesInBackground();
     }
   }
@@ -907,8 +607,7 @@ class HikarungProApp {
         }
       }
 
-      this.state.initialSampleLoaded = true;
-      this.state.initialSamplesV2Loaded = true;
+      this.state.initialSamplesLoaded = true;
       await this.saveAppState();
       this.renderAll();
     } catch (err) {
@@ -990,8 +689,8 @@ class HikarungProApp {
         referenced.add(this.editorDraft.audioId);
       }
 
-      const allRecords = await this.db.getAllAudioFiles();
-      for (const rec of allRecords) {
+      const allMeta = await this.db.getAllAudioMeta();
+      for (const rec of allMeta) {
         if (!referenced.has(rec.id)) {
           await this.db.deleteAudioFile(rec.id);
           this.audioBuffers.delete(rec.id);
@@ -1177,13 +876,20 @@ class HikarungProApp {
     const configuredFadeIn = Math.max(0, safeNum(pad.fadeIn, 0));
     const configuredFadeOut = Math.max(0, safeNum(pad.fadeOut, 2.0));
 
-    const fadeInSec = (pad.triggerMode === 'xfade' && configuredFadeIn < 0.05)
+    const rawFadeInSec = (pad.triggerMode === 'xfade' && configuredFadeIn < 0.05)
       ? Math.min(2.0, Math.max(0.3, configuredFadeOut))
       : configuredFadeIn;
 
+    const isLoop = Boolean(pad.loop);
+    const willAutoFadeOut = !isLoop && configuredFadeOut > 0.05 && playWallDuration > configuredFadeOut * 1.6 && pad.triggerMode === 'xfade';
+    const maxFadeInDur = willAutoFadeOut
+      ? Math.max(0.02, playWallDuration - configuredFadeOut - 0.02)
+      : playWallDuration;
+    const fadeInSec = Math.min(rawFadeInSec, maxFadeInDur);
+
     if (fadeInSec > 0.02) {
       voiceGain.gain.setValueAtTime(0.0001, now);
-      voiceGain.gain.linearRampToValueAtTime(targetGain, now + Math.min(fadeInSec, playWallDuration));
+      voiceGain.gain.linearRampToValueAtTime(targetGain, now + fadeInSec);
     } else {
       voiceGain.gain.setValueAtTime(targetGain, now);
     }
@@ -1191,14 +897,13 @@ class HikarungProApp {
     source.connect(voiceGain);
     voiceGain.connect(this.masterSeGain);
 
-    const isLoop = Boolean(pad.loop);
     if (isLoop) {
       source.loop = true;
       source.loopStart = trimStart;
       source.loopEnd = trimEnd;
       source.start(now, trimStart);
     } else {
-      if (configuredFadeOut > 0.05 && playWallDuration > configuredFadeOut * 1.6 && pad.triggerMode === 'xfade') {
+      if (willAutoFadeOut) {
         const fadeStartWall = now + playWallDuration - configuredFadeOut;
         voiceGain.gain.setValueAtTime(targetGain, fadeStartWall);
         voiceGain.gain.linearRampToValueAtTime(0.0001, now + playWallDuration);
@@ -1254,8 +959,9 @@ class HikarungProApp {
       if (v.isFadingOut && fadeSec > 0.1) continue;
       v.isFadingOut = true;
       try {
+        const curGain = Math.max(0.0001, v.gainNode.gain.value);
         v.gainNode.gain.cancelScheduledValues(now);
-        v.gainNode.gain.setValueAtTime(Math.max(0.0001, v.gainNode.gain.value), now);
+        v.gainNode.gain.setValueAtTime(curGain, now);
         v.gainNode.gain.linearRampToValueAtTime(0.0001, now + Math.max(0.02, fadeSec));
         v.source.stop(now + Math.max(0.025, fadeSec + 0.01));
       } catch (_) { }
@@ -1280,6 +986,7 @@ class HikarungProApp {
     if (this.bgmPlayer.isPlaying) {
       this.fadeStopBgm(fadeSec);
     }
+    if (this.library) this.library.stopPreview();
     this.showToast(`全音源を ${fadeSec}秒 でフェードアウト中...`);
   }
 
@@ -1294,7 +1001,7 @@ class HikarungProApp {
     }
     this.stopBgmImmediately();
     this.stopEditorPreview();
-    this.stopLibraryPreview();
+    if (this.library) this.library.stopPreview();
     this.showToast('🛑 すべての音声を即時停止しました');
   }
 
@@ -1326,6 +1033,9 @@ class HikarungProApp {
     if (seq !== this.bgmPlaySeq) return;
 
     if (!buffer) {
+      if (this.bgmPlayer.activeNode) {
+        this.retireActiveBgmNode(0.05);
+      }
       this.bgmPlayer.isPlaying = false;
       this.renderBgmTrackList();
       this.updateBgmTransportUI();
@@ -1431,8 +1141,9 @@ class HikarungProApp {
     const ctx = this.ensureAudioContext();
     const now = ctx.currentTime;
     try {
+      const curGain = Math.max(0.0001, node.gainNode.gain.value);
       node.gainNode.gain.cancelScheduledValues(now);
-      node.gainNode.gain.setValueAtTime(Math.max(0.0001, node.gainNode.gain.value), now);
+      node.gainNode.gain.setValueAtTime(curGain, now);
       node.gainNode.gain.linearRampToValueAtTime(0.0001, now + Math.max(0.02, fadeSec));
       node.source.stop(now + Math.max(0.03, fadeSec + 0.01));
     } catch (_) { }
@@ -1668,9 +1379,10 @@ class HikarungProApp {
     const hasPads = this.activePadVoices.size > 0;
     const hasBgm = Boolean(this.bgmPlayer.isPlaying && this.bgmPlayer.activeNode);
     const hasPreview = Boolean(this.previewVoice && !document.getElementById('editorModal').classList.contains('hidden'));
+    const hasLibPreview = Boolean(this.library && this.library.previewItemId);
 
     // COMPLETE IDLE SLEEP: 0% CPU/GPU usage when no sound is playing
-    if (!hasPads && !hasBgm && !hasPreview) {
+    if (!hasPads && !hasBgm && !hasPreview && !hasLibPreview) {
       this.scheduleStopBackgroundKeepAliveIfIdle();
       if (!this.vuState.isIdleDrawn) {
         this.drawVuMeter(false);
@@ -2030,7 +1742,7 @@ class HikarungProApp {
           <button type="button" class="pad-gear-btn" title="波形編集・設定を開く">⚙️</button>
         </div>
 
-        <div class="pad-title">${hasAudio ? this.escapeHtml(pad.name) : '＋ タップで音源割当'}</div>
+        <div class="pad-title">${hasAudio ? this.escapeHtml(pad.name) : (this.isEditMode ? '＋ タップで音源割当' : '未割当')}</div>
 
         <div class="pad-bottom-row">
           <span class="pad-time">${timeStr}</span>
@@ -2457,6 +2169,7 @@ class HikarungProApp {
     const pad = bank.pads[padIndex];
     if (!pad) return;
 
+    const myOpenSeq = ++this.editorOpenSeq;
     this.editorTarget = { type: 'pad', bankId: bank.id, padIndex };
     this.editorDraft = JSON.parse(JSON.stringify(pad));
     this.editorDraft.key = this.getSlotKey(padIndex);
@@ -2473,6 +2186,7 @@ class HikarungProApp {
 
     if (this.editorDraft.audioId && !this.audioBuffers.has(this.editorDraft.audioId)) {
       await this.getOrDecodeAudioBuffer(this.editorDraft.audioId);
+      if (myOpenSeq !== this.editorOpenSeq) return;
     }
 
     this.populateEditorModalFields();
@@ -2487,6 +2201,7 @@ class HikarungProApp {
     const track = pl.tracks[trackIndex];
     if (!track) return;
 
+    const myOpenSeq = ++this.editorOpenSeq;
     this.editorTarget = { type: 'bgm', playlistId: pl.id, trackIndex };
     this.editorDraft = JSON.parse(JSON.stringify(track));
     this.editorZoom = 1;
@@ -2502,6 +2217,7 @@ class HikarungProApp {
 
     if (this.editorDraft.audioId && !this.audioBuffers.has(this.editorDraft.audioId)) {
       await this.getOrDecodeAudioBuffer(this.editorDraft.audioId);
+      if (myOpenSeq !== this.editorOpenSeq) return;
     }
 
     this.populateEditorModalFields();
@@ -2959,18 +2675,23 @@ class HikarungProApp {
 
   async exportFullBackup() {
     this.showToast('バックアップデータを作成中...');
-    const audioFiles = await this.db.getAllAudioFiles();
-    const serializedAudio = audioFiles.map((rec) => ({
-      id: rec.id,
-      name: rec.name,
-      mimeType: rec.mimeType,
-      duration: rec.duration,
-      base64: this.arrayBufferToBase64(rec.arrayBuffer)
-    }));
+    const allMeta = await this.db.getAllAudioMeta();
+    const serializedAudio = [];
+    for (const meta of allMeta) {
+      const rec = await this.db.getAudioFile(meta.id);
+      if (!rec || !rec.arrayBuffer) continue;
+      serializedAudio.push({
+        id: rec.id,
+        name: rec.name,
+        mimeType: rec.mimeType,
+        duration: rec.duration,
+        base64: this.arrayBufferToBase64(rec.arrayBuffer)
+      });
+    }
 
     const payload = {
       app: 'HIKARUNG-PRO',
-      version: 2,
+      version: 4,
       exportedAt: new Date().toISOString(),
       state: this.state,
       audioFiles: serializedAudio
@@ -3026,7 +2747,7 @@ class HikarungProApp {
       }
 
       this.panicStopAll();
-      await this.db.clearAll();
+      await this.db.clearProjectData();
       this.audioBuffers.clear();
       this.audioMeta.clear();
       this.longBufferOrder = [];
@@ -3058,6 +2779,7 @@ class HikarungProApp {
         bgmXfade: 3.0,
         bgmMonoLink: 'off',
         outputMode: 'stereo',
+        initialSamplesLoaded: true,
         slotKeys: {}
       }, payload.state);
 
@@ -3097,7 +2819,7 @@ class HikarungProApp {
 
     document.getElementById('btnModeLive').addEventListener('click', () => {
       this.isEditMode = false;
-      this.stopLibraryPreview();
+      if (this.library) this.library.stopPreview();
       this.renderTopBarState();
       this.renderPadGrid();
       this.showToast('🟢 本番モード（タップで即発音）');
@@ -3162,77 +2884,32 @@ class HikarungProApp {
 
     document.getElementById('btnToggleBgmDeck').addEventListener('click', (e) => {
       const deck = document.getElementById('bgmDeck');
-      const collapsed = deck.classList.toggle('collapsed');
-      e.currentTarget.classList.toggle('active', !collapsed);
+      const willOpen = deck.classList.contains('collapsed');
+      if (willOpen && window.innerWidth <= 960) {
+        // Keep Library and BGM mutually exclusive on portrait/narrow screens so Pads never crush
+        const libPanel = document.getElementById('mediaLibraryPanel');
+        const libBtn = document.getElementById('btnToggleLibrary');
+        if (libPanel && !libPanel.classList.contains('collapsed')) {
+          libPanel.classList.add('collapsed');
+          if (libBtn) libBtn.classList.remove('active');
+          if (this.library) {
+            this.library.isOpen = false;
+            this.library.stopWatchLoop();
+            this.library.stopPreview();
+          }
+        }
+      }
+      deck.classList.toggle('collapsed', !willOpen);
+      e.currentTarget.classList.toggle('active', willOpen);
     });
 
-    const btnToggleLib = document.getElementById('btnToggleLibrary');
-    if (btnToggleLib) {
-      btnToggleLib.addEventListener('click', () => {
-        const panel = document.getElementById('mediaLibraryPanel');
-        const collapsed = panel.classList.toggle('collapsed');
-        this.mediaLibrary.isOpen = !collapsed;
-        btnToggleLib.classList.toggle('active', this.mediaLibrary.isOpen);
-        if (this.mediaLibrary.isOpen && this.mediaLibrary.dirHandle) {
-          this.scanWatchedDirectory(true);
-          this.startLibraryWatchLoop();
-        } else {
-          this.stopLibraryWatchLoop();
-          if (!this.mediaLibrary.isOpen) this.stopLibraryPreview();
-        }
-      });
-    }
-
-    const btnLibWatch = document.getElementById('btnLibWatchFolder');
-    if (btnLibWatch) {
-      btnLibWatch.addEventListener('click', () => this.pickWatchFolder());
-    }
-    const btnLibAdd = document.getElementById('btnLibAddFiles');
-    if (btnLibAdd) {
-      btnLibAdd.addEventListener('click', () => document.getElementById('inputLibFiles').click());
-    }
-    const btnLibRescan = document.getElementById('btnLibRescan');
-    if (btnLibRescan) {
-      btnLibRescan.addEventListener('click', () => this.scanWatchedDirectory(false));
-    }
-    const btnLibClear = document.getElementById('btnLibClear');
-    if (btnLibClear) {
-      btnLibClear.addEventListener('click', () => this.clearMediaLibrary());
-    }
-    const btnLibResume = document.getElementById('btnLibResumeWatch');
-    if (btnLibResume) {
-      btnLibResume.addEventListener('click', () => this.resumeWatchFolderPermission());
-    }
-    const inputLibFolder = document.getElementById('inputLibFolder');
-    if (inputLibFolder) {
-      inputLibFolder.addEventListener('change', async (e) => {
-        const files = Array.from(e.target.files || []);
-        e.target.value = '';
-        if (files.length > 0) await this.importFilesToLibraryPool(files);
-      });
-    }
-    const inputLibFiles = document.getElementById('inputLibFiles');
-    if (inputLibFiles) {
-      inputLibFiles.addEventListener('change', async (e) => {
-        const files = Array.from(e.target.files || []);
-        e.target.value = '';
-        if (files.length > 0) await this.importFilesToLibraryPool(files);
-      });
-    }
-    const inputLibSearch = document.getElementById('inputLibSearch');
-    if (inputLibSearch) {
-      inputLibSearch.addEventListener('input', (e) => {
-        this.mediaLibrary.searchQuery = e.target.value.trim().toLowerCase();
-        this.renderMediaLibrary();
-      });
-    }
-    const selectLibFolder = document.getElementById('selectLibFolder');
-    if (selectLibFolder) {
-      selectLibFolder.addEventListener('change', (e) => {
-        this.mediaLibrary.folderFilter = e.target.value;
-        this.renderMediaLibrary();
-      });
-    }
+    // Release any stuck GATE keyboard holds when window loses focus
+    window.addEventListener('blur', () => {
+      for (const padId of this.gatePressedPads) {
+        this.stopPadVoices(padId, 0.08);
+      }
+      this.gatePressedPads.clear();
+    });
 
     document.getElementById('btnAddBank').addEventListener('click', async () => {
       const name = await this.showPromptDialog('バンク追加', '新しい進行バンク（セットリスト）の名前を入力してください:', `${this.state.banks.length + 1}. 新規コーナー`);
@@ -3797,7 +3474,7 @@ class HikarungProApp {
       e.target.value = '';
     });
     document.getElementById('btnFactoryReset').addEventListener('click', async () => {
-      const ok = await this.showConfirmDialog('全データの初期化', 'すべての音源と設定を初期状態（初期サンプル構成）にリセットしますか？');
+      const ok = await this.showConfirmDialog('全データの初期化', 'パッド・BGM・メディアライブラリを含むすべての音源と設定を初期状態へリセットしますか？');
       if (!ok) return;
       this.panicStopAll();
       await this.db.clearAll();
@@ -3872,608 +3549,6 @@ class HikarungProApp {
         }
       }
     });
-  }
-
-  // ==================== MEDIA LIBRARY (HYBRID PC FOLDER WATCH + IPAD POOL) ====================
-  isSupportedAudioFilename(filename) {
-    const ext = (String(filename).split('.').pop() || '').toLowerCase();
-    return ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'webm', 'opus', 'aiff', 'aif'].includes(ext);
-  }
-
-  async initMediaLibrary() {
-    try {
-      const records = await this.db.getAllLibraryItems();
-      const pool = [];
-      let savedHandleRec = null;
-
-      for (const rec of records) {
-        if (rec.id === 'dir_handle' && rec.type === 'handle' && rec.handle) {
-          savedHandleRec = rec;
-        } else if (rec.type === 'pool_file') {
-          pool.push({
-            id: rec.id,
-            source: 'pool',
-            name: rec.name,
-            ext: rec.ext || '',
-            folder: rec.folder || '',
-            relPath: rec.relPath || rec.name,
-            mimeType: rec.mimeType || 'audio/mpeg',
-            size: rec.size || 0
-          });
-        }
-      }
-
-      pool.sort((a, b) => a.relPath.localeCompare(b.relPath, 'ja', { numeric: true }));
-      this.mediaLibrary.poolItems = pool;
-
-      if (savedHandleRec && 'showDirectoryPicker' in window) {
-        this.mediaLibrary.dirHandle = savedHandleRec.handle;
-        this.mediaLibrary.dirName = savedHandleRec.name || savedHandleRec.handle.name || 'フォルダ';
-        try {
-          const perm = await savedHandleRec.handle.queryPermission({ mode: 'read' });
-          if (perm === 'granted') {
-            await this.scanWatchedDirectory(true);
-          } else {
-            const banner = document.getElementById('libraryPermissionBanner');
-            const btn = document.getElementById('btnLibResumeWatch');
-            if (btn) btn.textContent = `🔓 「${this.mediaLibrary.dirName}」の監視を再開`;
-            if (banner) banner.classList.remove('hidden');
-          }
-        } catch (_) { }
-      }
-
-      this.renderMediaLibrary();
-    } catch (_) { }
-  }
-
-  async pickWatchFolder() {
-    if ('showDirectoryPicker' in window) {
-      try {
-        const handle = await window.showDirectoryPicker({ mode: 'read' });
-        this.mediaLibrary.dirHandle = handle;
-        this.mediaLibrary.dirName = handle.name;
-        this.mediaLibrary.lastSignature = '';
-        await this.db.saveLibraryItem({
-          id: 'dir_handle',
-          type: 'handle',
-          handle,
-          name: handle.name
-        });
-        const banner = document.getElementById('libraryPermissionBanner');
-        if (banner) banner.classList.add('hidden');
-        await this.scanWatchedDirectory(false);
-        this.startLibraryWatchLoop();
-      } catch (err) {
-        if (err && err.name !== 'AbortError') {
-          this.showToast(`フォルダ読み込みエラー: ${err.message}`);
-        }
-      }
-    } else {
-      // iPadOS Safari fallback: folder/multi-file picker into IndexedDB Media Library pool
-      const folderInput = document.getElementById('inputLibFolder');
-      if (folderInput) folderInput.click();
-    }
-  }
-
-  async resumeWatchFolderPermission() {
-    const handle = this.mediaLibrary.dirHandle;
-    if (!handle) return;
-    try {
-      const perm = await handle.requestPermission({ mode: 'read' });
-      if (perm === 'granted') {
-        const banner = document.getElementById('libraryPermissionBanner');
-        if (banner) banner.classList.add('hidden');
-        await this.scanWatchedDirectory(false);
-        this.startLibraryWatchLoop();
-      }
-    } catch (err) {
-      this.showToast(`権限取得エラー: ${err.message}`);
-    }
-  }
-
-  async scanWatchedDirectory(silent = false) {
-    const rootHandle = this.mediaLibrary.dirHandle;
-    if (!rootHandle || this.mediaLibrary.isScanning) return;
-    this.mediaLibrary.isScanning = true;
-
-    try {
-      const found = [];
-      const walk = async (dirHandle, prefix, depth) => {
-        if (depth > 6) return;
-        for await (const [entryName, handle] of dirHandle.entries()) {
-          if (entryName.startsWith('.')) continue;
-          if (handle.kind === 'directory') {
-            await walk(handle, prefix ? `${prefix}/${entryName}` : entryName, depth + 1);
-          } else if (handle.kind === 'file' && this.isSupportedAudioFilename(entryName)) {
-            let size = 0;
-            let lastModified = 0;
-            try {
-              const f = await handle.getFile();
-              size = f.size;
-              lastModified = f.lastModified;
-            } catch (_) { }
-            const ext = (entryName.split('.').pop() || '').toUpperCase();
-            const cleanName = entryName.replace(/\.[^/.]+$/, '');
-            const relPath = prefix ? `${prefix}/${entryName}` : entryName;
-            found.push({
-              id: `fs_${relPath}`,
-              source: 'fs',
-              name: cleanName,
-              ext,
-              folder: prefix || '',
-              relPath,
-              fileHandle: handle,
-              size,
-              lastModified
-            });
-          }
-        }
-      };
-
-      await walk(rootHandle, '', 0);
-      found.sort((a, b) => a.relPath.localeCompare(b.relPath, 'ja', { numeric: true }));
-
-      const sig = found.map((f) => `${f.relPath}:${f.size}:${f.lastModified}`).join('|');
-      if (silent && sig === this.mediaLibrary.lastSignature) {
-        return;
-      }
-
-      this.mediaLibrary.lastSignature = sig;
-      this.mediaLibrary.fsItems = found;
-      this.renderMediaLibrary();
-      if (!silent) {
-        this.showToast(`📂 「${this.mediaLibrary.dirName}」から ${found.length}件 を検出しました`);
-      }
-    } catch (err) {
-      if (!silent) {
-        this.showToast(`フォルダスキャン失敗: ${err.message}`);
-      }
-    } finally {
-      this.mediaLibrary.isScanning = false;
-    }
-  }
-
-  startLibraryWatchLoop() {
-    this.stopLibraryWatchLoop();
-    if (!this.mediaLibrary.dirHandle) return;
-    this.mediaLibrary.watchTimer = setInterval(() => {
-      if (this.mediaLibrary.isOpen && !document.hidden && this.mediaLibrary.dirHandle) {
-        this.scanWatchedDirectory(true);
-      }
-    }, 5000);
-  }
-
-  stopLibraryWatchLoop() {
-    if (this.mediaLibrary.watchTimer) {
-      clearInterval(this.mediaLibrary.watchTimer);
-      this.mediaLibrary.watchTimer = null;
-    }
-  }
-
-  async importFilesToLibraryPool(files) {
-    const audioFiles = files.filter((f) => this.isSupportedAudioFilename(f.name) || (f.type && f.type.startsWith('audio/')));
-    if (audioFiles.length === 0) {
-      this.showToast('再生可能な音声ファイルが見つかりませんでした');
-      return;
-    }
-
-    let added = 0;
-    for (let i = 0; i < audioFiles.length; i++) {
-      const file = audioFiles[i];
-      try {
-        if (audioFiles.length >= 3 && (i === 0 || (i + 1) % 5 === 0)) {
-          this.showToast(`ライブラリへ登録中... (${i + 1}/${audioFiles.length})`);
-        }
-        const rel = file.webkitRelativePath || file.name;
-        const parts = rel.split('/');
-        const folder = parts.length > 1 ? parts.slice(0, -1).join('/') : '';
-        const ext = (file.name.split('.').pop() || '').toUpperCase();
-        const cleanName = file.name.replace(/\.[^/.]+$/, '');
-        const id = `pool_${rel}_${file.size}`;
-        const arrayBuffer = await file.arrayBuffer();
-
-        await this.db.saveLibraryItem({
-          id,
-          type: 'pool_file',
-          name: cleanName,
-          ext,
-          folder,
-          relPath: rel,
-          mimeType: file.type || 'audio/mpeg',
-          size: file.size,
-          arrayBuffer
-        });
-
-        const existingIdx = this.mediaLibrary.poolItems.findIndex((x) => x.id === id);
-        const meta = {
-          id,
-          source: 'pool',
-          name: cleanName,
-          ext,
-          folder,
-          relPath: rel,
-          mimeType: file.type || 'audio/mpeg',
-          size: file.size
-        };
-        if (existingIdx >= 0) this.mediaLibrary.poolItems[existingIdx] = meta;
-        else this.mediaLibrary.poolItems.push(meta);
-        added++;
-      } catch (_) { }
-    }
-
-    this.mediaLibrary.poolItems.sort((a, b) => a.relPath.localeCompare(b.relPath, 'ja', { numeric: true }));
-    this.renderMediaLibrary();
-    this.showToast(`📚 ライブラリに ${added}件 追加しました`);
-  }
-
-  async clearMediaLibrary() {
-    const total = this.mediaLibrary.fsItems.length + this.mediaLibrary.poolItems.length;
-    if (total === 0 && !this.mediaLibrary.dirHandle) {
-      this.showToast('ライブラリはすでに空です');
-      return;
-    }
-    const ok = await this.showConfirmDialog(
-      'ライブラリをクリア',
-      'メディアライブラリの一覧と監視フォルダ設定をクリアしますか？（パッドやBGMに登録済みの音源は消えません）'
-    );
-    if (!ok) return;
-
-    this.stopLibraryWatchLoop();
-    this.stopLibraryPreview();
-    await this.db.clearLibraryItems();
-    this.mediaLibrary.dirHandle = null;
-    this.mediaLibrary.dirName = '';
-    this.mediaLibrary.fsItems = [];
-    this.mediaLibrary.poolItems = [];
-    this.mediaLibrary.lastSignature = '';
-    this.mediaLibrary.folderFilter = '';
-    const banner = document.getElementById('libraryPermissionBanner');
-    if (banner) banner.classList.add('hidden');
-    this.renderMediaLibrary();
-    this.showToast('メディアライブラリをクリアしました');
-  }
-
-  renderMediaLibrary() {
-    const listEl = document.getElementById('libraryTrackList');
-    const sourceLabel = document.getElementById('librarySourceLabel');
-    const rescanBtn = document.getElementById('btnLibRescan');
-    const folderSel = document.getElementById('selectLibFolder');
-    const countLabel = document.getElementById('libraryCountLabel');
-    if (!listEl) return;
-
-    const allItems = [...this.mediaLibrary.fsItems, ...this.mediaLibrary.poolItems];
-
-    if (sourceLabel) {
-      if (this.mediaLibrary.dirHandle) {
-        sourceLabel.textContent = `監視中: ${this.mediaLibrary.dirName}`;
-      } else if (this.mediaLibrary.poolItems.length > 0) {
-        sourceLabel.textContent = `ライブラリプール`;
-      } else {
-        sourceLabel.textContent = 'フォルダ未指定';
-      }
-    }
-    if (rescanBtn) {
-      rescanBtn.classList.toggle('hidden', !this.mediaLibrary.dirHandle);
-    }
-
-    // Update folder filter dropdown
-    if (folderSel) {
-      const folders = Array.from(new Set(allItems.map((it) => it.folder).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'ja', { numeric: true }));
-      const prevVal = this.mediaLibrary.folderFilter;
-      folderSel.innerHTML = '<option value="">すべてのフォルダ</option>';
-      for (const f of folders) {
-        const opt = document.createElement('option');
-        opt.value = f;
-        opt.textContent = `📁 ${f}`;
-        folderSel.appendChild(opt);
-      }
-      folderSel.value = folders.includes(prevVal) ? prevVal : '';
-      this.mediaLibrary.folderFilter = folderSel.value;
-    }
-
-    const q = this.mediaLibrary.searchQuery;
-    const fFilter = this.mediaLibrary.folderFilter;
-    const filtered = allItems.filter((it) => {
-      if (fFilter && it.folder !== fFilter) return false;
-      if (q) {
-        const hay = `${it.name} ${it.folder} ${it.ext}`.toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
-    });
-
-    if (countLabel) {
-      countLabel.textContent = filtered.length === allItems.length
-        ? `${allItems.length}件`
-        : `${filtered.length} / ${allItems.length}件`;
-    }
-
-    listEl.innerHTML = '';
-    if (filtered.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'library-empty';
-      empty.innerHTML = allItems.length === 0
-        ? '<p>📂 フォルダ指定または「＋ 追加」で音源を読み込んでください</p><p class="library-empty-sub">項目をドラッグしてパッドやBGMリストへ直接ドロップできます</p>'
-        : '<p>条件に一致する音源がありません</p>';
-      listEl.appendChild(empty);
-      return;
-    }
-
-    const frag = document.createDocumentFragment();
-    for (const item of filtered) {
-      const isPreviewing = this.mediaLibrary.previewItemId === item.id;
-      const row = document.createElement('div');
-      row.className = `lib-item${isPreviewing ? ' previewing' : ''}`;
-      row.dataset.libId = item.id;
-      row.title = item.relPath;
-      row.innerHTML = `
-        <span class="lib-drag-grip" aria-hidden="true">⋮⋮</span>
-        <div class="lib-item-main">
-          <div class="lib-item-name">${this.escapeHtml(item.name)}</div>
-          ${item.folder ? `<div class="lib-item-folder">📁 ${this.escapeHtml(item.folder)}</div>` : ''}
-        </div>
-        <span class="lib-item-ext">${this.escapeHtml(item.ext || 'AUD')}</span>
-        <button type="button" class="btn-lib-preview" title="サンプル試聴 (編集モード専用)">${isPreviewing ? '⏹' : '▶'}</button>
-      `;
-      const prevBtn = row.querySelector('.btn-lib-preview');
-      if (prevBtn) {
-        prevBtn.addEventListener('click', (ev) => {
-          ev.stopPropagation();
-          this.toggleLibraryPreview(item);
-        });
-      }
-      row.addEventListener('pointerdown', (e) => this.handleLibraryItemPointerDown(e, item, row));
-      frag.appendChild(row);
-    }
-    listEl.appendChild(frag);
-  }
-
-  updateLibraryPreviewUI() {
-    const listEl = document.getElementById('libraryTrackList');
-    if (!listEl) return;
-    const activeId = this.mediaLibrary.previewItemId;
-    listEl.querySelectorAll('.lib-item').forEach((row) => {
-      const isMatch = Boolean(activeId && row.dataset.libId === activeId);
-      row.classList.toggle('previewing', isMatch);
-      const btn = row.querySelector('.btn-lib-preview');
-      if (btn) btn.textContent = isMatch ? '⏹' : '▶';
-    });
-  }
-
-  stopLibraryPreview() {
-    this.mediaLibrary.previewSeq++;
-    if (this.mediaLibrary.previewAudio) {
-      try {
-        this.mediaLibrary.previewAudio.pause();
-        this.mediaLibrary.previewAudio.src = '';
-      } catch (_) { }
-      this.mediaLibrary.previewAudio = null;
-    }
-    if (this.mediaLibrary.previewUrl) {
-      try { URL.revokeObjectURL(this.mediaLibrary.previewUrl); } catch (_) { }
-      this.mediaLibrary.previewUrl = null;
-    }
-    if (this.mediaLibrary.previewItemId !== null) {
-      this.mediaLibrary.previewItemId = null;
-      this.updateLibraryPreviewUI();
-    }
-  }
-
-  async toggleLibraryPreview(item) {
-    if (!this.isEditMode) return;
-    if (this.mediaLibrary.previewItemId === item.id) {
-      this.stopLibraryPreview();
-      return;
-    }
-    this.stopLibraryPreview();
-    const mySeq = ++this.mediaLibrary.previewSeq;
-    try {
-      const file = await this.getFileFromLibraryItem(item);
-      if (mySeq !== this.mediaLibrary.previewSeq || !this.isEditMode) return;
-      const url = URL.createObjectURL(file);
-      const audio = new Audio(url);
-      audio.volume = Math.max(0, Math.min(1, (this.state.masterVol || 100) / 100));
-      this.mediaLibrary.previewAudio = audio;
-      this.mediaLibrary.previewUrl = url;
-      this.mediaLibrary.previewItemId = item.id;
-      this.updateLibraryPreviewUI();
-
-      audio.onended = () => {
-        if (mySeq === this.mediaLibrary.previewSeq) this.stopLibraryPreview();
-      };
-      audio.onerror = () => {
-        if (mySeq === this.mediaLibrary.previewSeq) {
-          this.stopLibraryPreview();
-          this.showToast(`「${item.name}」の試聴に失敗しました`);
-        }
-      };
-      await audio.play();
-    } catch (err) {
-      if (mySeq === this.mediaLibrary.previewSeq) {
-        this.stopLibraryPreview();
-        this.showToast(`試聴エラー: ${err.message}`);
-      }
-    }
-  }
-
-  handleLibraryItemPointerDown(e, item, rowEl) {
-    if (e.target.closest('.btn-lib-preview')) return;
-    if (e.button !== 0 && e.pointerType === 'mouse') return;
-
-    const isGrip = Boolean(e.target.closest('.lib-drag-grip'));
-    const isMouse = e.pointerType === 'mouse';
-
-    // On touch devices (iPad), only start drag from the left grip handle so the row body scrolls cleanly
-    if (!isMouse && !isGrip) return;
-
-    if (isGrip && !isMouse) {
-      e.preventDefault();
-    }
-
-    const startX = e.clientX;
-    const startY = e.clientY;
-    let dragActive = false;
-    let ghostEl = null;
-    let lastDropEl = null;
-
-    const activateDrag = (cx, cy) => {
-      if (dragActive) return;
-      dragActive = true;
-      rowEl.classList.add('dragging-source');
-      ghostEl = document.createElement('div');
-      ghostEl.className = 'lib-drag-ghost';
-      ghostEl.textContent = `🎵 ${item.name}`;
-      ghostEl.style.left = `${cx}px`;
-      ghostEl.style.top = `${cy}px`;
-      document.body.appendChild(ghostEl);
-    };
-
-    const clearDropHighlight = () => {
-      if (lastDropEl) {
-        lastDropEl.classList.remove('lib-drop-target');
-        lastDropEl = null;
-      }
-    };
-
-    const findDropTarget = (cx, cy) => {
-      const els = document.elementsFromPoint(cx, cy);
-      for (const el of els) {
-        const pad = el.closest && el.closest('.sound-pad');
-        if (pad) return { type: 'pad', el: pad, padIndex: Number(pad.dataset.padIndex) };
-        const bgm = el.closest && el.closest('#bgmDeck');
-        if (bgm) return { type: 'bgm', el: bgm };
-      }
-      return null;
-    };
-
-    const onMove = (ev) => {
-      const dx = ev.clientX - startX;
-      const dy = ev.clientY - startY;
-
-      if (!dragActive && Math.hypot(dx, dy) > 5) {
-        activateDrag(ev.clientX, ev.clientY);
-      }
-
-      if (dragActive && ghostEl) {
-        ev.preventDefault();
-        ghostEl.style.left = `${ev.clientX}px`;
-        ghostEl.style.top = `${ev.clientY}px`;
-        const target = findDropTarget(ev.clientX, ev.clientY);
-        const nextEl = target ? target.el : null;
-        if (nextEl !== lastDropEl) {
-          clearDropHighlight();
-          if (nextEl) {
-            nextEl.classList.add('lib-drop-target');
-            lastDropEl = nextEl;
-          }
-        }
-      }
-    };
-
-    const cleanup = () => {
-      window.removeEventListener('pointermove', onMove, { passive: false });
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onCancel);
-      rowEl.classList.remove('dragging-source');
-      clearDropHighlight();
-      if (ghostEl) {
-        ghostEl.remove();
-        ghostEl = null;
-      }
-    };
-
-    const onUp = (ev) => {
-      const wasActive = dragActive;
-      const target = wasActive ? findDropTarget(ev.clientX, ev.clientY) : null;
-      cleanup();
-      if (!wasActive || !target) return;
-
-      if (target.type === 'pad' && Number.isInteger(target.padIndex)) {
-        this.assignLibraryItemToPad(item, target.padIndex);
-      } else if (target.type === 'bgm') {
-        this.addLibraryItemToBgmPlaylist(item);
-      }
-    };
-
-    const onCancel = () => cleanup();
-
-    window.addEventListener('pointermove', onMove, { passive: false });
-    window.addEventListener('pointerup', onUp);
-    window.addEventListener('pointercancel', onCancel);
-  }
-
-  async getFileFromLibraryItem(item) {
-    if (item.source === 'fs' && item.fileHandle) {
-      return await item.fileHandle.getFile();
-    }
-    if (item.source === 'pool') {
-      const rec = await this.db.getLibraryItem(item.id);
-      if (!rec || !rec.arrayBuffer) {
-        throw new Error('ライブラリ音源データが見つかりません');
-      }
-      const fname = (rec.relPath || rec.name).split('/').pop();
-      return new File([rec.arrayBuffer], fname, { type: rec.mimeType || 'audio/mpeg' });
-    }
-    throw new Error('音源を取得できませんでした');
-  }
-
-  async assignLibraryItemToPad(item, padIndex) {
-    const bank = this.getCurrentBank();
-    if (!bank || !bank.pads[padIndex]) return;
-    try {
-      this.showToast(`「${item.name}」を読み込み中...`);
-      const file = await this.getFileFromLibraryItem(item);
-      const info = await this.importAudioFileToRecord(file, true);
-      const pad = bank.pads[padIndex];
-      const wasEmpty = !pad.audioId;
-
-      pad.name = info.name;
-      pad.audioId = info.audioId;
-      pad.trimStart = 0;
-      pad.trimEnd = Number(info.duration.toFixed(2));
-      if (info.duration >= 30) {
-        pad.triggerMode = 'xfade';
-      } else if (wasEmpty) {
-        pad.triggerMode = 'poly';
-      }
-
-      await this.saveAppState();
-      this.gcOrphanAudioFiles();
-      this.renderPadGrid();
-      const xfadeNote = info.duration >= 30 ? '（30秒以上のため X-FADE）' : '';
-      this.showToast(`PAD #${padIndex + 1} に「${info.name}」をセットしました${xfadeNote}`);
-    } catch (err) {
-      this.showToast(`登録エラー: ${err.message}`);
-    }
-  }
-
-  async addLibraryItemToBgmPlaylist(item) {
-    const pl = this.getCurrentPlaylist();
-    if (!pl) return;
-    try {
-      this.showToast(`BGMへ「${item.name}」を追加中...`);
-      const file = await this.getFileFromLibraryItem(item);
-      const info = await this.importAudioFileToRecord(file, false);
-      pl.tracks.push({
-        id: `trk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-        name: info.name,
-        audioId: info.audioId,
-        gain: 90,
-        trimStart: 0,
-        trimEnd: Number(info.duration.toFixed(2)),
-        fadeIn: 0.5,
-        fadeOut: 2.5,
-        speed: 1.0,
-        pitch: 0
-      });
-      await this.saveAppState();
-      this.renderPlaylistSelector();
-      this.renderBgmTrackList();
-      this.updateBgmTransportUI();
-      this.showToast(`BGMリストに「${info.name}」を追加しました`);
-    } catch (err) {
-      this.showToast(`BGM追加エラー: ${err.message}`);
-    }
   }
 
   // ==================== NON-BLOCKING CUSTOM DIALOGS (NEVER STOPS AUDIO, IME-SAFE) ====================

@@ -23,9 +23,13 @@
 
 ```text
 iPadSoundPad/
-├── index.html                  # メインUI構造（トップバー、バンクバー、パッドグリッド、BGMデッキ、各種モーダル）
-├── styles.css                  # iPadタッチ最適化・ダークテーマCSS（レスポンシブ・ドラッグゴースト演出含む）
-├── app.js                      # コアロジック（HikarungDB, HikarungProApp：Audioエンジン、波形描画、UI制御）
+├── index.html                  # メインUI構造（トップバー、バンクバー、ライブラリ、パッド、VUメーター、BGMデッキ、各種モーダル）
+├── styles.css                  # iPadタッチ最適化・ダークテーマCSS
+├── js/
+│   ├── constants.js            # バージョン・定数・MIME判定ユーティリティ
+│   ├── db.js                   # HikarungDB (HikarungProDB v1: メタデータとバイナリを完全分離した5ストア構成)
+│   ├── media-library.js        # メディアライブラリ（PCフォルダ監視 / iPadプール / D&D / Web Audio試聴）
+│   └── app.js                  # コアアプリ（Audioエンジン、2×2出力マトリクス、VUメーター、波形エディタ、BGMデッキ）
 ├── sw.js                       # Service Worker（Cache-Firstオフラインキャッシュ制御）
 ├── manifest.json               # Web App Manifest（standalone全画面表示・ホーム画面アイコン定義）
 ├── icon.svg                    # アプリアイコン（インラインSVG）
@@ -39,13 +43,17 @@ iPadSoundPad/
 
 ## 3. システムアーキテクチャ & オーディオエンジン仕様
 
-### 3.1 オーディオルーティング構造
+### 3.1 オーディオルーティング構造（v4.0.0）
 
 ```mermaid
 flowchart LR
   subgraph Pads["サンプラーパッド群 (最大24パッド×複数バンク)"]
     P1["Pad Voice 1 (AudioBufferSourceNode)"] --> PG1["Voice GainNode (個別音量0~300% + FadeIn/Out)"]
     P2["Pad Voice N (同時発音・重ね打ち)"] --> PG2["Voice GainNode"]
+  end
+
+  subgraph LibPrev["メディアライブラリ試聴 (編集モード限定)"]
+    LP["HTMLAudio + MediaElementSourceNode"]
   end
 
   subgraph BGM["BGMプレイリストデッキ (独立再生)"]
@@ -55,17 +63,22 @@ flowchart LR
 
   PG1 --> MSE["masterSeGain (MASTER音量)"]
   PG2 --> MSE
+  LP --> MSE
   BG1 --> MBGM["masterBgmGain (MASTER × BGM音量 × TALK OVER 25%減衰)"]
   BG2 --> MBGM
 
-  MSE --> DEST["AudioContext.destination (iPad / PC 出力)"]
-  MBGM --> DEST
+  MSE --> BUS["masterMixBus (明示2chステレオ)"]
+  MBGM --> BUS
+  BUS --> LIM["masterLimiter (DynamicsCompressor)"]
+  LIM --> MAT["2×2 出力マトリクス (ステレオ / モノラルL+R / Lのみ・R無音)"]
+  MAT --> VU["ChannelSplitter → Analyser L/R (VUメーター)"]
+  MAT --> DEST["AudioContext.destination (iPad / PC 出力)"]
 ```
 
 ### 3.2 iPadOS Safari 特有の制約回避と高速化ロジック
-1. **起動時の非ブロッキング並列デコード**:
-   - 起動時（`loadOrInitData()`）は、まずIndexedDBから設定（`appState`）だけを読み込んで**即座にUIを描画（`renderAll()`）**する。
-   - 保存済み音源バイナリ（`ArrayBuffer`）のデコードには、ユーザー操作前に `suspended` 状態になる通常の `AudioContext` ではなく **`OfflineAudioContext(2, 1, 44100)`** を使用し、`Promise.all()` で並列デコードして `this.audioBuffers` (`Map<audioId, AudioBuffer>`) にキャッシュする。
+1. **メタデータ／バイナリ完全分離による起動時 OOM 防止 (`HikarungProDB v1`)**:
+   - IndexedDB は `appState` / `audioMeta` / `audioBlobs` / `libraryMeta` / `libraryBlobs` の5ストアに分離。起動時は軽量なメタデータのみ読み込むため、大量の音源やライブラリを保存しても起動時のメモリスパイクが起きない。
+   - 30秒未満のSEのみ4件ずつ並列プリデコードし、30秒以上の長尺BGMは再生時オンデマンドデコード＋LRUキャッシュ（RAM常駐上限3曲）で管理。
 2. **初回タッチ時のハードウェア即時ウォームアップ**:
    - 画面のどこかを最初にタッチ（`pointerdown`）した瞬間に `ensureAudioContext()` を呼び出し、`AudioContext` の生成・`resume()` と同時に **1サンプルの無音バッファ（`createBuffer(1, 1, 22050)`）を即座に再生**する。これによりiPadOSのオーディオハードウェアが遅延なく起動する。
 3. **実効再生レート（スピード×ピッチ）の計算式**:

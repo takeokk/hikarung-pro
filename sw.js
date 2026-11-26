@@ -1,9 +1,12 @@
-const CACHE_NAME = 'hikarung-pro-v3.4.0';
+const CACHE_NAME = 'hikarung-pro-v4.0.0';
 const ASSETS = [
   './',
   './index.html',
   './styles.css',
-  './app.js',
+  './js/constants.js',
+  './js/db.js',
+  './js/media-library.js',
+  './js/app.js',
   './manifest.json',
   './icon.svg',
   './icon-180.png',
@@ -50,12 +53,14 @@ self.addEventListener('fetch', (event) => {
   }
 
   event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
+    caches.match(event.request, { ignoreSearch: true }).then((cachedResponse) => {
       const networkUpdate = fetch(event.request)
         .then((networkResponse) => {
           if (networkResponse && networkResponse.status === 200) {
             const clone = networkResponse.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+            return caches.open(CACHE_NAME)
+              .then((cache) => cache.put(event.request, clone))
+              .then(() => networkResponse);
           }
           return networkResponse;
         })
